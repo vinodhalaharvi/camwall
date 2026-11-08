@@ -186,3 +186,16 @@ func TestManyCamerasAreFast(t *testing.T) {
 	t.Logf("25 feeds: %d states, %.3g shapes, smallest %.4f, fill %.3f, %v",
 		s.Stats.States, s.Count(), w.Smallest, w.Fill, time.Since(start))
 }
+
+func TestNearlyEqualShapesShareAKind(t *testing.T) {
+	feeds := []Feed{{960.0 / 538, 1}, {16.0 / 9, 1}, {1280.0 / 722, 1}, {4.0 / 3, 1}}
+	kinds, kindOf, err := Group(feeds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 2 || kindOf[0] != kindOf[1] || kindOf[1] != kindOf[2] {
+		t.Errorf("want two kinds (16:9-ish, 4:3), got %d: %v", len(kinds), kindOf)
+	}
+	s, _ := Solve(feeds)
+	checkGeometry(t, feeds, 16.0/9, s.Fit(16.0/9)) // tiles keep exact shapes
+}

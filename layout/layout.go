@@ -253,7 +253,12 @@ type Solved struct {
 	Stats  dyna.Stats
 }
 
-// Group sorts feeds into kinds (same aspect, same weight).
+// SameShape is how close two aspect ratios must be (1%) for feeds to count
+// as the same kind: a 960×538 camera and a 1920×1080 one are both 16:9.
+// Tiles still keep each feed's exact shape; only the search groups them.
+const SameShape = 0.01
+
+// Group sorts feeds into kinds (nearly the same aspect, the same weight).
 func Group(feeds []Feed) (kinds []Feed, kindOf []int, err error) {
 	if len(feeds) == 0 {
 		return nil, nil, errors.New("no feeds")
@@ -261,10 +266,6 @@ func Group(feeds []Feed) (kinds []Feed, kindOf []int, err error) {
 	if len(feeds) > MaxFeeds {
 		return nil, nil, fmt.Errorf("at most %d feeds", MaxFeeds)
 	}
-	key := func(f Feed) [2]float64 {
-		return [2]float64{math.Round(f.Aspect * 1000), math.Round(f.Weight * 1000)}
-	}
-	idx := map[[2]float64]int{}
 	kindOf = make([]int, len(feeds))
 	for i, f := range feeds {
 		if !(f.Aspect > 0) || math.IsInf(f.Aspect, 0) {
@@ -276,13 +277,18 @@ func Group(feeds []Feed) (kinds []Feed, kindOf []int, err error) {
 		if !(f.Weight > 0) {
 			return nil, nil, fmt.Errorf("feed %d: weight must be positive", i+1)
 		}
-		k, ok := idx[key(f)]
-		if !ok {
+		k := -1
+		for j, kd := range kinds {
+			if math.Abs(math.Log(f.Aspect/kd.Aspect)) < SameShape && math.Abs(f.Weight-kd.Weight) < 1e-9 {
+				k = j
+				break
+			}
+		}
+		if k < 0 {
 			k = len(kinds)
 			if k == MaxKinds {
 				return nil, nil, fmt.Errorf("at most %d different feed shapes and weights", MaxKinds)
 			}
-			idx[key(f)] = k
 			kinds = append(kinds, f)
 		}
 		kindOf[i] = k
