@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0d10">
+<title>Recordings · camwall</title>
+<style>
+  :root { --bg: #0b0d10; --card: #11151a; --line: #232932; --ink: #e8ebf0; --dim: #9aa3ae; --accent: #4cc38a;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; }
+  header { position: sticky; top: 0; z-index: 2; background: #0f1216; border-bottom: 1px solid var(--line); padding: 12px 16px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header .sp { flex: 1; }
+  input, button, a.b { font: inherit; color: var(--ink); background: #1a1f26; border: 1px solid #262c35; border-radius: 6px; padding: 6px 10px; }
+  a.b { text-decoration: none; }
+  button { cursor: pointer; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  .found { background: #13261d; border: 1px solid #2e5c45; border-radius: 8px; padding: 12px; margin-bottom: 16px; display: none; }
+  .found h2 { font-size: 13px; margin: 0 0 8px; color: var(--accent); font-weight: 600; }
+  .feed { background: var(--card); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; }
+  .feed > summary { padding: 12px 14px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; list-style: none; }
+  .feed > summary::-webkit-details-marker { display: none; }
+  .feed > summary b { font-weight: 600; }
+  .muted { color: var(--dim); font-size: 12px; }
+  .day { padding: 4px 14px 12px; }
+  .day h3 { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); margin: 10px 0 6px; font-weight: 600; }
+  .rec { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+  .rec:first-of-type { border-top: 0; }
+  .rec audio { width: 100%; height: 34px; }
+  .badge { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #1f3a2d; color: var(--accent); }
+  .badge.off { background: #3a2a1f; color: #f2b84b; }
+  .empty { color: var(--dim); text-align: center; padding: 40px 0; }
+  @media (max-width: 600px) { .rec { grid-template-columns: 1fr auto; } .rec audio { grid-column: 1 / -1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Recorded sound</h1>
+  <label for="when" class="muted">Go to</label>
+  <input type="datetime-local" id="when" step="1">
+  <button id="go">Find</button>
+  <span class="sp"></span>
+  <a class="b" href="./">Back to the wall</a>
+</header>
+<main>
+  <section class="found" id="found" aria-live="polite"><h2 id="found-title"></h2><div id="found-list"></div></section>
+  <div id="list"></div>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+let SEGMENT = 15 * 60 * 1000;  // longest a file can be; the next file's start ends it sooner
+let folders = [];
+
+const pad = (n) => String(n).padStart(2, '0');
+const hm = (d) => pad(d.getHours()) + ':' + pad(d.getMinutes()) + (d.getSeconds() ? ':' + pad(d.getSeconds()) : '');
+const dayName = (d) => d.toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+const mb = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+const url = (folder, file) => 'rec/' + encodeURIComponent(folder) + '/' + encodeURIComponent(file);
+const label = (folder) => folder.replace(/^\d+ /, '');
+
+function el(tag, cls, parent, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; if (parent) parent.append(e); return e; }
+
+// end of each file: the next file's start if it follows on, else start + segment length
+function spans(files) {
+  const asc = files.map(f => ({ ...f, t: new Date(f.start) })).sort((a, b) => a.t - b.t);
+  asc.forEach((f, i) => {
+    const next = asc[i + 1];
+    f.end = new Date(Math.min(+f.t + SEGMENT, next ? +next.t : Infinity));
+  });
+  return asc.reverse();
+}
+
+function player(parent, folder, f, offset) {
+  const row = el('div', 'rec', parent);
+  el('span', null, row, hm(f.t) + ' – ' + hm(f.end));
+  const a = el('audio', null, row);
+  a.controls = true; a.preload = offset != null ? 'metadata' : 'none';
+  a.src = url(folder, f.name) + (offset != null ? '#t=' + Math.max(0, offset - 5) : '');
+  const dl = el('a', 'muted', row, mb(f.size));
+  dl.href = url(folder, f.name); dl.download = label(folder) + ' ' + f.name; dl.title = 'Download';
+  return a;
+}
+
+function render() {
+  const list = $('list');
+  list.textContent = '';
+  if (!folders.length) { el('p', 'empty', list, 'Nothing recorded yet.'); return; }
+  for (const fd of folders) {
+    const det = el('details', 'feed', list);
+    const sum = el('summary', null, det);
+    el('b', null, sum, label(fd.name));
+    const files = spans(fd.files || []);
+    el('span', 'muted', sum, files.length ? `${files.length} file${files.length === 1 ? '' : 's'}, latest ${dayName(files[0].t)} ${hm(files[0].t)}` : 'no files yet');
+    if (fd.status) el('span', 'badge' + (fd.status === 'recording' ? '' : ' off'), sum, fd.status);
+    let day = '', box = null;
+    for (const f of files) {
+      const d = dayName(f.t);
+      if (d !== day) { day = d; box = el('div', 'day', det); el('h3', null, box, d); }
+      player(box, fd.name, f);
+    }
+  }
+}
+
+// Find what every feed recorded at a moment, cued five seconds before it.
+function find() {
+  const v = $('when').value;
+  if (!v) return;
+  const t = new Date(v);
+  const out = $('found-list');
+  out.textContent = '';
+  $('found').style.display = 'block';
+  $('found-title').textContent = 'Recorded at ' + dayName(t) + ' ' + t.toLocaleTimeString();
+  let n = 0;
+  for (const fd of folders) {
+    const f = spans(fd.files || []).find(f => f.t <= t && t < f.end);
+    if (!f) continue;
+    n++;
+    el('div', 'muted', out, label(fd.name));
+    player(out, fd.name, f, (t - f.t) / 1000);
+  }
+  if (!n) el('p', 'muted', out, 'No feed was recording then.');
+}
+
+$('go').onclick = find;
+$('when').onkeydown = (e) => { if (e.key === 'Enter') find(); };
+(async () => {
+  try {
+    const r = await fetch('api/recordings', { cache: 'no-store' });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    folders = data.folders || [];
+    if (data.segment) SEGMENT = data.segment * 1000;
+    const now = new Date(Date.now() - 10 * 60000);
+    $('when').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+    render();
+  } catch (e) { el('p', 'empty', $('list'), 'Could not load recordings: ' + e.message); }
+})();
+</script>
+</body>
+</html>

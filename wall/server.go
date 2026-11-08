@@ -3,6 +3,7 @@
 package wall
 
 import (
+	"context"
 	"embed"
 	"encoding/binary"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/vinodhalaharvi/camwall/feeds"
 	"github.com/vinodhalaharvi/camwall/layout"
+	"github.com/vinodhalaharvi/camwall/record"
 )
 
 //go:embed web
@@ -25,9 +28,14 @@ var webFS embed.FS
 
 // Server is the browser wall.
 type Server struct {
-	Title string
-	Feeds []feeds.Feed
-	Hubs  []*Hub // nil for feeds served as files
+	Title  string
+	Feeds  []feeds.Feed
+	Hubs   []*Hub // nil for feeds served as files
+	Tools  feeds.Tools
+	Rec    *record.Recorder // nil when sound is not being recorded
+	RecDir string           // recordings to list (even when another camwall records them)
+
+	listeners chan struct{} // limits concurrent live-sound streams
 
 	mu    sync.Mutex
 	cache map[string]*layout.Solved
@@ -43,7 +51,8 @@ func Static(f feeds.Feed) bool {
 
 // New makes a server and a hub for every moving feed.
 func New(title string, t feeds.Tools, fs []feeds.Feed, fps, maxSide, quality int) *Server {
-	s := &Server{Title: title, Feeds: fs, Hubs: make([]*Hub, len(fs)), cache: map[string]*layout.Solved{}}
+	s := &Server{Title: title, Feeds: fs, Hubs: make([]*Hub, len(fs)), Tools: t, cache: map[string]*layout.Solved{},
+		listeners: make(chan struct{}, 8)}
 	for i, f := range fs {
 		if !Static(f) {
 			s.Hubs[i] = &Hub{ID: i, Feed: f, Tools: t, FPS: fps, MaxSide: maxSide, Quality: quality, Linger: 15 * time.Second}
@@ -89,6 +98,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /media/{id}", s.media)
 	mux.HandleFunc("GET /snapshot/{id}", s.snapshot)
 	mux.HandleFunc("GET /stream", s.stream)
+	mux.HandleFunc("GET /audio/{id}", s.audio)
+	mux.HandleFunc("GET /recordings", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, sub, "recordings.html")
+	})
+	mux.HandleFunc("GET /api/recordings", s.apiRecordings)
+	mux.HandleFunc("GET /rec/{folder}/{file}", s.recording)
 	return mux
 }
 
@@ -99,6 +114,7 @@ type feedInfo struct {
 	Aspect float64 `json:"aspect"`
 	Weight float64 `json:"weight"`
 	Static bool    `json:"static"`
+	Audio  bool    `json:"audio"`
 	Note   string  `json:"note,omitempty"`
 }
 
@@ -110,11 +126,12 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 func (s *Server) apiFeeds(w http.ResponseWriter, r *http.Request) {
 	out := struct {
-		Title string     `json:"title"`
-		Feeds []feedInfo `json:"feeds"`
-	}{Title: s.Title}
+		Title      string     `json:"title"`
+		Feeds      []feedInfo `json:"feeds"`
+		Recordings bool       `json:"recordings"`
+	}{Title: s.Title, Recordings: s.RecDir != ""}
 	for i, f := range s.Feeds {
-		out.Feeds = append(out.Feeds, feedInfo{i, f.Name, string(f.Kind), f.Aspect, f.Weight, Static(f), f.Note})
+		out.Feeds = append(out.Feeds, feedInfo{i, f.Name, string(f.Kind), f.Aspect, f.Weight, Static(f), f.Audio && !Static(f), f.Note})
 	}
 	writeJSON(w, out)
 }
@@ -319,4 +336,125 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 	}
+}
+
+// Sound for live listening: 24 kHz mono 16-bit little-endian PCM, which the
+// page plays with Web Audio as it arrives (well under a second behind).
+const (
+	AudioRate     = 24000
+	audioChunk    = AudioRate * 2 / 10 // 100 ms
+	maxListenTime = 4 * time.Hour
+)
+
+// audio streams a feed's sound while the request lasts. Each listener gets
+// its own FFmpeg; at most a few run at once.
+func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.feedID(w, r)
+	if !ok {
+		return
+	}
+	f := s.Feeds[id]
+	if !f.Audio || Static(f) {
+		http.Error(w, "this feed has no sound", http.StatusNotFound)
+		return
+	}
+	select {
+	case s.listeners <- struct{}{}:
+		defer func() { <-s.listeners }()
+	default:
+		http.Error(w, "too many people listening", http.StatusServiceUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), maxListenTime)
+	defer cancel()
+	octx, ocancel := context.WithTimeout(ctx, 30*time.Second)
+	g, err := f.Opened(octx, s.Tools)
+	ocancel()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "nobuffer", "-flags", "low_delay"}
+	args = append(args, g.InputArgs(10)...)
+	args = append(args, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", strconv.Itoa(AudioRate), "-f", "s16le", "pipe:1")
+	cmd := exec.CommandContext(ctx, s.Tools.FFmpeg, args...)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer cmd.Wait()
+	defer cancel()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Audio-Format", "s16le;rate="+strconv.Itoa(AudioRate)+";channels=1")
+	fl, _ := w.(http.Flusher)
+	buf := make([]byte, audioChunk)
+	for {
+		n, err := out.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// apiRecordings lists the recorded sound, per feed, newest first.
+func (s *Server) apiRecordings(w http.ResponseWriter, r *http.Request) {
+	if s.RecDir == "" {
+		http.Error(w, "sound is not being recorded (start camwall with -record DIR)", http.StatusNotFound)
+		return
+	}
+	folders, err := record.List(s.RecDir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	status := map[string]string{}
+	if s.Rec != nil {
+		for i, st := range s.Rec.Status() {
+			status[record.FolderName(i, s.Feeds[i].Name)] = st
+		}
+	}
+	type folder struct {
+		record.Folder
+		Status string `json:"status,omitempty"`
+	}
+	out := struct {
+		Segment float64  `json:"segment"` // seconds per file, when this camwall records
+		Folders []folder `json:"folders"`
+	}{Folders: make([]folder, 0, len(folders))}
+	if s.Rec != nil {
+		out.Segment = s.Rec.Segment.Seconds()
+	}
+	for _, f := range folders {
+		out.Folders = append(out.Folders, folder{f, status[f.Name]})
+	}
+	writeJSON(w, out)
+}
+
+// recording serves one recorded file (with seeking).
+func (s *Server) recording(w http.ResponseWriter, r *http.Request) {
+	if s.RecDir == "" {
+		http.NotFound(w, r)
+		return
+	}
+	p, ok := record.Path(s.RecDir, r.PathValue("folder"), r.PathValue("file"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/mp4")
+	http.ServeFile(w, r, p)
 }

@@ -82,9 +82,32 @@ camwall serve -f cams.txt -addr :7788 -password s3cret   # TVs, tablets and phon
 - **Full screen** (F) and **Hide bar** (K) turn a spare screen into a monitor wall. Open `/?kiosk` to start that way.
 - A tile shows **Reconnecting…** when its camera drops, and picks up again by itself.
 
+- **🔊** on a tile with sound plays that camera live, one camera at a time, about a quarter of a second behind. **Stop** (M) in the bar ends it.
+
 ![The front door pinned: the wall re-solves around it](docs/pinned.jpg)
 
 Each camera is opened once, however many people are watching, and only while someone is watching. All feeds reach the page over a single connection, so a wall of 20 cameras isn't limited by the browser's six connections per server. With `-password`, viewers sign in with the user name `camwall`.
+
+## Keep the sound for later
+
+```sh
+camwall serve -f cams.txt -record recordings              # wall and recording together
+camwall record -f cams.txt -o recordings -keep 30d        # recording only, e.g. on a spare computer
+```
+
+Every feed with a microphone is recorded continuously, whether or not anyone is watching. Files are cut every 15 minutes on the clock (`-segment`) and named by when they start, in a folder per camera:
+
+```
+recordings/01 Front door/2026-11-08_14-15-00.m4a
+recordings/01 Front door/2026-11-08_14-30-00.m4a
+recordings/03 Register/2026-11-08_14-15-00.m4a
+```
+
+So "what happened at 14:37" is the 14:30 file, seven minutes in. The **Recordings** button on the wall opens a page that does this for you: pick a date and time, and every camera's recording from that moment is cued five seconds before it.
+
+Files are AAC in fragmented MP4, and they play in any browser, QuickTime, VLC or Windows Media Player. They're written a second at a time, so a power cut loses at most the last second. Recordings older than `-keep` (default `7d`; `0` keeps everything) are deleted. Sound takes about 21 MB per camera per hour. Cameras that are offline at start-up are retried until they come back; a camera without a microphone is skipped.
+
+Recording sound can be regulated where you are, for example needing signs or the consent of the people recorded. Check the rules that apply to your shop.
 
 ## One combined stream
 
@@ -132,7 +155,7 @@ The layout is a dynamic program written with [dyna](https://github.com/vinodhala
 
 - Up to 25 feeds per wall. For more, run a second wall.
 - Each feed costs one FFmpeg decode. A wall of 16 HD cameras needs a reasonably recent computer, so lower `-fps` or `-max` in the browser, or `-size` for streams, on small machines. A camera's sub-stream (often `…/102` or `subtype=1`) is lighter and plenty for a wall.
-- The browser wall has no sound. The combined stream carries the sound of one feed.
+- The browser wall plays one camera's sound at a time, and the combined stream carries one feed's sound. Recording keeps every feed's sound.
 - A capture device such as a webcam can usually be opened by only one program at a time, so it can't be in a browser wall and a combined stream at once.
 - Animated WebP needs FFmpeg 8 for the combined stream. Older FFmpeg leaves it blank there; browsers still play it.
 - DRM-protected video can't be shown.

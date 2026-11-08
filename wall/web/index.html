@@ -43,9 +43,15 @@
     border: 0; background: rgb(0 0 0 / .55); color: var(--ink); font-size: 15px; cursor: pointer;
     opacity: 0; transition: opacity .15s;
   }
+  .tile .snd { right: 40px; }
   .tile:hover .pin, .tile .pin.on, .tile .pin:focus-visible { opacity: 1; }
   .tile .pin.on { color: var(--warn); }
+  .tile .snd.on { color: var(--accent); background: rgb(0 0 0 / .75); outline: 1px solid var(--accent); }
   @media (hover: none) { .tile .pin { opacity: .8; } }
+  #listening { display: none; align-items: center; gap: 6px; color: var(--accent); white-space: nowrap; }
+  #listening.on { display: inline-flex; }
+  #listening button { padding: 2px 8px; }
+  #recs { text-decoration: none; display: none; }
   body.focus .tile { display: none; }
   body.focus .tile.focused { display: block; inset: 0 !important; width: auto !important; height: auto !important; }
   body.focus .tile.focused .in { cursor: zoom-out; }
@@ -58,12 +64,12 @@
   #bar b { color: var(--ink); font-weight: 600; margin-right: 6px; white-space: nowrap; }
   #bar .sp { flex: 1; }
   #summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  button.b {
+  .b {
     background: #1a1f26; color: var(--ink); border: 1px solid #262c35; border-radius: 6px;
     padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap;
   }
-  button.b:hover { background: #222832; }
-  button.b[aria-pressed="true"] { background: #1f3a2d; border-color: #2e5c45; }
+  .b:hover { background: #222832; }
+  .b[aria-pressed="true"] { background: #1f3a2d; border-color: #2e5c45; }
   body.kiosk { --bar: 0px; }
   body.kiosk #bar { display: none; }
 
@@ -94,7 +100,7 @@
   @media (max-width: 700px) {
     #panel { left: 0; width: auto; top: auto; max-height: 62vh; border-left: 0; border-top: 1px solid var(--line); }
     #summary, #kiosk { display: none; }
-    button.b { padding: 5px 8px; }
+    .b { padding: 5px 8px; }
   }
 </style>
 </head>
@@ -124,6 +130,8 @@
 <div id="bar">
   <b id="title">camwall</b><span id="summary"></span>
   <span class="sp"></span>
+  <span id="listening" aria-live="polite"><span id="listen-name"></span><button class="b" id="listen-stop" title="Stop listening (M)">Stop</button></span>
+  <a class="b" id="recs" href="recordings" target="_blank" rel="noopener" title="Recorded sound">Recordings</a>
   <button class="b" id="settings" aria-pressed="false" title="Settings (S)">Settings</button>
   <button class="b" id="kiosk" title="Hide this bar (K); press K or Esc to bring it back">Hide bar</button>
   <button class="b" id="full" title="Full screen (F)">Full screen</button>
@@ -156,6 +164,7 @@ async function init() {
   if (!r.ok) throw new Error(await r.text());
   const info = await r.json();
   feeds = info.feeds; title = info.title;
+  if (info.recordings) $('recs').style.display = 'inline-block';
   document.title = title; $('title').textContent = title;
   load();
   if (params.has('nonames')) S.names = false;
@@ -174,8 +183,15 @@ async function init() {
     pin.textContent = '★'; pin.title = 'Make this feed bigger';
     pin.setAttribute('aria-label', 'Make ' + f.name + ' bigger');
     pin.onclick = (e) => { e.stopPropagation(); setSize(f, sizeOf(f) >= PIN ? f.weight : PIN); };
+    let snd = null;
+    if (f.audio) {
+      snd = el('button', 'pin snd', inn);
+      snd.textContent = '🔈'; snd.title = 'Listen to this feed';
+      snd.setAttribute('aria-label', 'Listen to ' + f.name);
+      snd.onclick = (e) => { e.stopPropagation(); listen.id === f.id ? stopListen() : startListen(f.id); };
+    }
     inn.onclick = () => setFocus(focused === f.id ? -1 : f.id);
-    tiles.push({ t, img, msg, pin, url: null, busy: false, pending: null, last: 0 });
+    tiles.push({ t, img, msg, pin, snd, url: null, busy: false, pending: null, last: 0 });
     if (f.note) console.warn(f.name + ': ' + f.note);
   }
   buildPanel();
@@ -255,6 +271,7 @@ function ratioText(a) {
 let rt;
 function changed(feedsChanged) {
   save(); apply();
+  if (listen.id >= 0 && S.hidden[feeds[listen.id].name]) stopListen();
   clearTimeout(rt); rt = setTimeout(relayout, 60);
   if (feedsChanged) restream();
 }
@@ -382,6 +399,69 @@ async function pollStatus() {
   }
 }
 
+// ---------- Live sound: one feed at a time ----------
+// The server sends 24 kHz mono 16-bit PCM; each 100 ms is scheduled right
+// after the last, and if playback falls more than ~0.6 s behind, it skips
+// ahead so the sound stays close to the picture.
+
+const RATE = 24000;
+let listen = { id: -1, ctrl: null, ac: null, next: 0 };
+
+function stopListen() {
+  if (listen.ctrl) listen.ctrl.abort();
+  if (listen.ac) listen.ac.close().catch(() => {});
+  if (listen.id >= 0 && tiles[listen.id].snd) { tiles[listen.id].snd.classList.remove('on'); tiles[listen.id].snd.textContent = '🔈'; }
+  listen = { id: -1, ctrl: null, ac: null, next: 0 };
+  $('listening').classList.remove('on');
+}
+
+function startListen(id) {
+  stopListen();
+  const ac = new (window.AudioContext || window.webkitAudioContext)(); // must start inside the click
+  const ctrl = new AbortController();
+  listen = { id, ctrl, ac, next: 0 };
+  tiles[id].snd.classList.add('on'); tiles[id].snd.textContent = '🔊';
+  $('listen-name').textContent = '🔊 ' + feeds[id].name;
+  $('listening').classList.add('on');
+  play(id, ac, ctrl.signal);
+}
+
+async function play(id, ac, signal) {
+  const mine = () => listen.ac === ac;
+  while (mine()) {
+    try {
+      const r = await fetch('audio/' + id, { cache: 'no-store', signal });
+      if (!r.ok || !r.body) throw new Error(await r.text());
+      const reader = r.body.getReader();
+      let pend = new Uint8Array(0);
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done || !mine()) break;
+        const nb = new Uint8Array(pend.length + value.length);
+        nb.set(pend); nb.set(value, pend.length); pend = nb;
+        const n = Math.floor(pend.length / 2);
+        if (n < RATE / 20) continue;              // wait for 50 ms of sound
+        const dv = new DataView(pend.buffer, pend.byteOffset, n * 2);
+        const buf = ac.createBuffer(1, n, RATE), ch = buf.getChannelData(0);
+        for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
+        pend = pend.slice(n * 2);
+        const now = ac.currentTime;
+        if (listen.next < now + 0.05 || listen.next > now + 0.6) listen.next = now + 0.15;
+        const src = ac.createBufferSource();
+        src.buffer = buf; src.connect(ac.destination); src.start(listen.next);
+        listen.next += buf.duration;
+      }
+    } catch (e) {
+      if (signal.aborted) return;
+      $('listen-name').textContent = '🔇 ' + feeds[id].name + ': ' + e.message;
+    }
+    if (!mine()) return;
+    await new Promise(res => setTimeout(res, 2000));   // reconnect
+  }
+}
+
+$('listen-stop').onclick = stopListen;
+
 function showError(text) { const e = $('err'); e.textContent = text; e.style.display = 'grid'; }
 
 function togglePanel() { S.panel = !S.panel; save(); apply(); relayout(); }
@@ -401,6 +481,7 @@ addEventListener('keydown', (e) => {
   } else if (k === 'k') toggleKiosk(!document.body.classList.contains('kiosk'));
   else if (k === 's') togglePanel();
   else if (k === 'n') { S.names = !S.names; changed(); }
+  else if (k === 'm') stopListen();
   else if (k === 'f') $('full').click();
 });
 init().catch(e => showError('Could not load the wall: ' + e.message));

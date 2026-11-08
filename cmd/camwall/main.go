@@ -25,6 +25,7 @@ import (
 	"github.com/vinodhalaharvi/camwall/feeds"
 	"github.com/vinodhalaharvi/camwall/layout"
 	"github.com/vinodhalaharvi/camwall/onvif"
+	"github.com/vinodhalaharvi/camwall/record"
 	"github.com/vinodhalaharvi/camwall/wall"
 )
 
@@ -36,6 +37,7 @@ Usage:
   camwall serve    [flags] SOURCE...   watch the wall in a browser
   camwall stream   [flags] SOURCE...   combine the feeds into one video with FFmpeg
   camwall plan     [flags] SOURCE...   print the wall for a screen shape
+  camwall record   [flags] SOURCE...   record the feeds' sound (no wall)
   camwall discover [flags]             find ONVIF cameras and print their RTSP addresses
   camwall devices                      list this computer's cameras and screens
   camwall laws                         verify the layout algebra against brute force
@@ -74,6 +76,13 @@ serve flags:
   -fps N           frames per second sent to browsers (default 10)
   -max PX          longest side of each feed in the browser (default 960)
   -no-open         don't open a browser
+  -record DIR      also record the sound of every feed that has some into DIR;
+                   the page then has a Recordings view (see record flags)
+
+record flags (also for serve -record):
+  -o DIR           where to record (camwall record; default recordings)
+  -keep AGE        delete recordings older than this: 7d (default), 36h, 0 keeps all
+  -segment D       length of each file (default 15m), aligned to the clock
 
 stream flags:
   -o DEST          file (.mp4 .mkv .ts .m3u8), URL (udp:// srt:// rtsp:// rtmp://),
@@ -124,6 +133,8 @@ func main() {
 		err = plan(args[1:])
 	case args[0] == "laws":
 		err = laws()
+	case args[0] == "record":
+		err = recordCmd(args[1:])
 	case args[0] == "devices":
 		err = devices()
 	case args[0] == "discover":
@@ -289,6 +300,9 @@ func serve(args []string) error {
 	fps := fs.Int("fps", 10, "")
 	maxSide := fs.Int("max", 960, "")
 	noOpen := fs.Bool("no-open", false, "")
+	recDir := fs.String("record", "", "")
+	keep := fs.String("keep", "7d", "")
+	segment := fs.Duration("segment", 15*time.Minute, "")
 	srcs, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -301,6 +315,20 @@ func serve(args []string) error {
 		return err
 	}
 	srv := wall.New(*title, tools, feedsList, *fps, *maxSide, 5)
+	recCtx, stopRec := context.WithCancel(context.Background())
+	defer stopRec()
+	recDone := make(chan struct{})
+	close(recDone)
+	if *recDir != "" {
+		rec, err := newRecorder(*recDir, *keep, *segment, tools, feedsList)
+		if err != nil {
+			return err
+		}
+		srv.Rec, srv.RecDir = rec, *recDir
+		recDone = make(chan struct{})
+		go func() { rec.Run(recCtx); close(recDone) }()
+		defer func() { stopRec(); <-recDone }()
+	}
 	base := make([]float64, len(feedsList))
 	all := make([]int, len(feedsList))
 	for i, f := range feedsList {
@@ -343,6 +371,88 @@ func serve(args []string) error {
 	if err := hs.Serve(ln); err != http.ErrServerClosed {
 		return err
 	}
+	return nil
+}
+
+// parseKeep reads a retention period: 7d, 36h, 0 (keep everything).
+func parseKeep(s string) (time.Duration, error) {
+	if s == "0" || s == "" {
+		return 0, nil
+	}
+	if d, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.ParseFloat(d, 64)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("-keep %q: want days like 7d, hours like 36h, or 0", s)
+		}
+		return time.Duration(n * 24 * float64(time.Hour)), nil
+	}
+	k, err := time.ParseDuration(s)
+	if err != nil || k < 0 {
+		return 0, fmt.Errorf("-keep %q: want days like 7d, hours like 36h, or 0", s)
+	}
+	return k, nil
+}
+
+// newRecorder sets up sound recording into dir and says what it will do.
+func newRecorder(dir, keep string, segment time.Duration, tools feeds.Tools, fs []feeds.Feed) (*record.Recorder, error) {
+	k, err := parseKeep(keep)
+	if err != nil {
+		return nil, err
+	}
+	if segment < 10*time.Second || segment > 24*time.Hour {
+		return nil, errors.New("-segment: 10s to 24h")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	n := 0
+	for _, f := range fs {
+		if record.Wants(f) {
+			n++
+		}
+	}
+	if n == 0 {
+		fmt.Fprintln(os.Stderr, "Recording sound: none of the feeds has sound.")
+	} else {
+		perDay := float64(n) * 48000 / 8 * 86400 / 1e9
+		kept := "kept until you delete them"
+		if k > 0 {
+			gb := perDay * k.Hours() / 24
+			size := fmt.Sprintf("%.0f GB", gb)
+			if gb < 1 {
+				size = fmt.Sprintf("%.0f MB", gb*1000)
+			}
+			kept = fmt.Sprintf("kept %s (about %s at most)", keep, size)
+		}
+		fmt.Fprintf(os.Stderr, "Recording the sound of %d feed%s into %s, in %v files, %s.\n", n, plural(n), dir, segment, kept)
+	}
+	return &record.Recorder{Dir: dir, Tools: tools, Feeds: fs, Segment: segment, Keep: k}, nil
+}
+
+// recordCmd records the feeds' sound without serving a wall.
+func recordCmd(args []string) error {
+	fs := newFlags("record")
+	var c common
+	c.register(fs)
+	out := fs.String("o", "recordings", "")
+	keep := fs.String("keep", "7d", "")
+	segment := fs.Duration("segment", 15*time.Minute, "")
+	srcs, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	feedsList, tools, err := c.load(srcs, true)
+	if err != nil {
+		return err
+	}
+	rec, err := newRecorder(*out, *keep, *segment, tools, feedsList)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintln(os.Stderr, "(Ctrl-C to stop)")
+	rec.Run(ctx)
 	return nil
 }
 
