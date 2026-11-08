@@ -118,6 +118,20 @@ func shift(f feeds.Feed, o Options) string {
 	return fmt.Sprintf("PTS-STARTPTS+(RTCSTART/1000000-%.6f)/TB", o.Start)
 }
 
+// PlatformBitrate is YouTube's recommended video bitrate for a 30 fps live
+// stream of the given height.
+func PlatformBitrate(height int) string {
+	switch {
+	case height <= 720:
+		return "4M"
+	case height <= 1080:
+		return "6M"
+	case height <= 1440:
+		return "10M"
+	}
+	return "20M"
+}
+
 // OutputFormat picks the container for a destination.
 func OutputFormat(out string) string {
 	if out == "-" {
@@ -154,33 +168,51 @@ func Args(w layout.Wall, fs []feeds.Feed, o Options) []string {
 	if enc == "" {
 		enc = "libx264"
 	}
+	format := o.Format
+	if format == "" {
+		format = OutputFormat(o.Output)
+	}
+	// Live platforms (YouTube, Twitch …, reached over RTMP) refuse a stream
+	// without sound and want a constant bitrate.
+	platform := format == "flv"
+	hasAudio := o.Audio-1 >= 0 && o.Audio-1 < len(fs)
+	if platform && !hasAudio {
+		args = append(args, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100")
+	}
 	args = append(args, "-filter_complex", Filter(rects, fs, o), "-map", "[out]")
-	if a := o.Audio - 1; a >= 0 && a < len(fs) {
+	switch {
+	case hasAudio:
 		args = append(args, "-map", "[aout]", "-c:a", "aac", "-b:a", "128k")
-	} else {
+	case platform:
+		args = append(args, "-map", strconv.Itoa(len(fs))+":a", "-c:a", "aac", "-b:a", "128k")
+	default:
 		args = append(args, "-an")
 	}
 	args = append(args, "-c:v", enc)
-	switch enc {
-	case "libx264":
+	br := o.Bitrate
+	if br == "" {
+		br = PlatformBitrate(o.Height)
+	}
+	switch {
+	case platform && (enc == "libx264" || enc == "libx265"):
+		args = append(args, "-preset", "veryfast", "-tune", "zerolatency", "-b:v", br, "-minrate", br, "-maxrate", br, "-bufsize", br)
+		if enc == "libx264" {
+			args = append(args, "-x264-params", "nal-hrd=cbr:force-cfr=1")
+		}
+	case enc == "libx264":
 		args = append(args, "-preset", "veryfast", "-tune", "zerolatency", "-crf", strconv.Itoa(o.CRF))
-	case "libx265":
+	case enc == "libx265":
 		args = append(args, "-preset", "veryfast", "-tune", "zerolatency", "-crf", strconv.Itoa(o.CRF+5), "-tag:v", "hvc1")
 	default:
-		br := o.Bitrate
-		if br == "" {
-			br = "6M"
-		}
 		args = append(args, "-b:v", br)
+		if platform {
+			args = append(args, "-maxrate", br, "-bufsize", br)
+		}
 	}
 	if !strings.Contains(enc, "videotoolbox") && !strings.Contains(enc, "vaapi") && !strings.Contains(enc, "qsv") {
 		args = append(args, "-pix_fmt", "yuv420p")
 	}
 	args = append(args, "-g", strconv.Itoa(2*o.FPS), "-r", strconv.Itoa(o.FPS))
-	format := o.Format
-	if format == "" {
-		format = OutputFormat(o.Output)
-	}
 	switch format {
 	case "rtsp":
 		args = append(args, "-rtsp_transport", "tcp")

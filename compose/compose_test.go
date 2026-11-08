@@ -111,3 +111,28 @@ func TestAudioEncoderFilter(t *testing.T) {
 		t.Errorf("default: %s", a)
 	}
 }
+
+func TestPlatformOutput(t *testing.T) {
+	sv, _ := layout.Solve([]layout.Feed{{Aspect: 16.0 / 9, Weight: 1}})
+	fs := []feeds.Feed{feeds.New("rtsp://h/a")}
+	fs[0].Aspect = 16.0 / 9
+	o := Options{Width: 1920, Height: 1080, FPS: 30, Background: "black", Output: "rtmp://a.rtmp.youtube.com/live2/KEY", CRF: 23, Start: 1}
+	a := strings.Join(Args(sv.Fit(16.0/9), fs, o), " ")
+	for _, want := range []string{"-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100", "-map 1:a -c:a aac",
+		"-b:v 6M -minrate 6M -maxrate 6M -bufsize 6M", "nal-hrd=cbr", "-g 60", "-f flv rtmp://"} {
+		if !strings.Contains(a, want) {
+			t.Errorf("YouTube args lack %q:\n%s", want, a)
+		}
+	}
+	if strings.Contains(a, "-crf") || strings.Contains(a, " -an ") {
+		t.Errorf("YouTube args should be CBR with sound:\n%s", a)
+	}
+	o.Audio = 1
+	if a := strings.Join(Args(sv.Fit(16.0/9), fs, o), " "); strings.Contains(a, "anullsrc") || !strings.Contains(a, "-map [aout]") {
+		t.Errorf("with a feed's sound, no silent track:\n%s", a)
+	}
+	o.Audio, o.Output = 0, "wall.mkv"
+	if a := strings.Join(Args(sv.Fit(16.0/9), fs, o), " "); strings.Contains(a, "anullsrc") || !strings.Contains(a, "-crf 23") {
+		t.Errorf("a file keeps quality-based encoding:\n%s", a)
+	}
+}

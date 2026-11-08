@@ -117,12 +117,15 @@ Recording sound can be regulated where you are, for example needing signs or the
 camwall stream -f cams.txt -o - | vlc -                    # watch in VLC
 camwall stream -f cams.txt -o wall.mkv                     # record
 camwall stream -f cams.txt -o rtsp://localhost:8554/wall   # restream (e.g. to MediaMTX)
+camwall stream -f cams.txt -o rtmp://a.rtmp.youtube.com/live2/YOUR-KEY   # YouTube Live
 camwall stream -f cams.txt -o srt://0.0.0.0:9000?mode=listener
 camwall stream -f cams.txt -o /var/www/wall/index.m3u8     # HLS for any browser or TV
 camwall stream -f cams.txt -dry-run                        # print the FFmpeg command
 ```
 
 `-size 3840x2160` sets the output size and `-fps` the frame rate. `-labels` draws names, which needs FFmpeg built with `drawtext`. `-audio 3` carries feed 3's sound into the stream. `-encoder` picks the video encoder: `libx265`, or a hardware one such as `h264_videotoolbox` on a Mac, `h264_nvenc` or `h264_qsv`, with `-bitrate`. If FFmpeg stops, for example because a camera dropped out, camwall restarts it.
+
+For RTMP destinations such as YouTube Live, Twitch or Facebook Live, camwall sends what these platforms expect: a constant bitrate sized to the output (4 Mbps at 720p, 6 Mbps at 1080p, or `-bitrate`), keyframes every 2 seconds, and a sound track. That's a silent one unless you pick a feed with `-audio`, because YouTube rejects streams without sound. YouTube's first live stream on a channel can take up to 24 hours to be enabled, and it ends streams after 12 hours; camwall reconnects by itself. For shop cameras, make the stream Unlisted or Private.
 
 All feeds share one clock. FFmpeg opens cameras one at a time, which can take several seconds, and the first cameras build up video in the meantime. Each packet is stamped with the time it arrives, and only the newest frame in each slot is kept. So every tile shows the present moment, rather than the first cameras running seconds behind the last.
 

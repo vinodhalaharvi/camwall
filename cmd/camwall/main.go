@@ -96,7 +96,9 @@ stream flags:
   -encoder NAME    video encoder: libx264 (default), libx265, h264_videotoolbox,
                    h264_nvenc, h264_qsv …
   -crf N           x264/x265 quality, lower is better (default 23)
-  -bitrate RATE    bitrate for other encoders (default 6M)
+  -bitrate RATE    bitrate for other encoders and for RTMP (YouTube, Twitch),
+                   which get a constant bitrate (default 4M at 720p, 6M at 1080p)
+                   and a silent sound track unless -audio is given
   -dry-run         print the FFmpeg command instead of running it
   -once            don't restart FFmpeg when it stops
 
@@ -113,6 +115,7 @@ Examples:
   camwall serve -f cams.txt -addr :7788 -password s3cret
   camwall stream -f cams.txt -audio 1 -o - | vlc -
   camwall stream -f cams.txt -o rtsp://localhost:8554/wall
+  camwall stream -f cams.txt -o rtmp://a.rtmp.youtube.com/live2/YOUR-KEY
 `
 
 func main() {
