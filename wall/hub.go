@@ -1,0 +1,312 @@
+package wall
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"io"
+	"log"
+	"os/exec"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/vinodhalaharvi/camwall/feeds"
+)
+
+// Hub runs one FFmpeg process for a moving feed and fans its JPEG frames out
+// to every viewer. It starts when the first viewer arrives, stops a while
+// after the last one leaves, and restarts with back-off if the feed drops.
+type Hub struct {
+	ID      int
+	Feed    feeds.Feed
+	FFmpeg  string
+	FPS     int
+	MaxSide int // longest side of frames sent to browsers
+	Quality int // JPEG quality for FFmpeg's -q:v, 2 (best) … 31
+	Linger  time.Duration
+
+	mu      sync.Mutex
+	frame   []byte
+	seq     uint64
+	last    time.Time
+	status  string
+	subs    map[chan struct{}]struct{}
+	cancel  context.CancelFunc
+	stopper *time.Timer
+}
+
+// Status is what the page shows on a tile.
+type Status struct {
+	State string `json:"state"` // starting, live, retrying, idle
+	Age   int    `json:"age"`   // milliseconds since the last frame, -1 if none
+}
+
+func (h *Hub) Status() Status {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	age := -1
+	if !h.last.IsZero() {
+		age = int(time.Since(h.last) / time.Millisecond)
+	}
+	st := h.status
+	if st == "" {
+		st = "idle"
+	}
+	return Status{st, age}
+}
+
+// Latest returns the newest frame and its sequence number.
+func (h *Hub) Latest() ([]byte, uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.frame, h.seq
+}
+
+// Subscribe registers a viewer. The channel gets a signal (dropped if one is
+// already pending) whenever a new frame arrives. Call the returned func to leave.
+func (h *Hub) Subscribe(ch chan struct{}) func() {
+	h.mu.Lock()
+	if h.subs == nil {
+		h.subs = map[chan struct{}]struct{}{}
+	}
+	h.subs[ch] = struct{}{}
+	if h.stopper != nil {
+		h.stopper.Stop()
+		h.stopper = nil
+	}
+	if h.cancel == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		h.cancel = cancel
+		h.status = "starting"
+		go h.run(ctx)
+	}
+	h.mu.Unlock()
+	return func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		delete(h.subs, ch)
+		if len(h.subs) == 0 && h.cancel != nil && h.stopper == nil {
+			h.stopper = time.AfterFunc(h.Linger, func() {
+				h.mu.Lock()
+				defer h.mu.Unlock()
+				if len(h.subs) == 0 && h.cancel != nil {
+					h.cancel()
+					h.cancel, h.stopper, h.status = nil, nil, "idle"
+				}
+			})
+		}
+	}
+}
+
+func (h *Hub) args() []string {
+	scale := "scale='if(gte(iw,ih),min(" + strconv.Itoa(h.MaxSide) + ",iw),-2)':'if(gte(iw,ih),-2,min(" + strconv.Itoa(h.MaxSide) + ",ih))'"
+	a := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
+	a = append(a, h.Feed.InputArgs(h.FPS)...)
+	return append(a, "-an", "-vf", "fps="+strconv.Itoa(h.FPS)+","+scale,
+		"-c:v", "mjpeg", "-q:v", strconv.Itoa(h.Quality), "-f", "image2pipe", "pipe:1")
+}
+
+func (h *Hub) run(ctx context.Context) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		start := time.Now()
+		err := h.once(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		h.mu.Lock()
+		h.status = "retrying"
+		h.mu.Unlock()
+		if time.Since(start) > 30*time.Second {
+			backoff = time.Second
+		}
+		log.Printf("feed %d (%s): %v; retrying in %v", h.ID+1, h.Feed.Name, err, backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(2*backoff, 30*time.Second)
+	}
+}
+
+type tail struct{ b []byte }
+
+func (t *tail) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > 2048 {
+		t.b = t.b[len(t.b)-2048:]
+	}
+	return len(p), nil
+}
+
+func (h *Hub) once(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, h.FFmpeg, h.args()...)
+	errs := &tail{}
+	cmd.Stderr = errs
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	readErr := splitJPEG(bufio.NewReaderSize(out, 1<<16), h.publish)
+	waitErr := cmd.Wait()
+	if msg := bytes.TrimSpace(errs.b); len(msg) > 0 {
+		if i := bytes.LastIndexByte(msg, '\n'); i >= 0 {
+			msg = msg[i+1:]
+		}
+		return &ffError{string(msg)}
+	}
+	if waitErr != nil {
+		return waitErr
+	}
+	if readErr != nil && readErr != io.EOF {
+		return readErr
+	}
+	return &ffError{"feed ended"}
+}
+
+type ffError struct{ msg string }
+
+func (e *ffError) Error() string { return e.msg }
+
+func (h *Hub) publish(jpg []byte) {
+	h.mu.Lock()
+	h.frame, h.last, h.status = jpg, time.Now(), "live"
+	h.seq++
+	for ch := range h.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	h.mu.Unlock()
+}
+
+// splitJPEG cuts a stream of concatenated JPEGs (as FFmpeg's image2pipe muxer
+// writes them) into frames by walking their markers: header segments are
+// skipped by their length, and inside entropy-coded data a 0xFF is only a
+// marker when not followed by 0x00 or a restart code. So the end-of-image
+// marker is found exactly, whatever bytes the tables or pixels contain.
+func splitJPEG(r *bufio.Reader, emit func([]byte)) error {
+	for {
+		frame, err := readJPEG(r)
+		if err != nil {
+			return err
+		}
+		if frame != nil {
+			emit(frame)
+		}
+	}
+}
+
+const maxFrame = 16 << 20
+
+func readJPEG(r *bufio.Reader) ([]byte, error) {
+	// find start of image
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		if b != 0xFF {
+			continue
+		}
+		nb, err := r.Peek(1)
+		if err != nil {
+			return nil, err
+		}
+		if nb[0] == 0xD8 {
+			r.ReadByte()
+			break
+		}
+	}
+	buf := []byte{0xFF, 0xD8}
+	marker := func() (byte, error) { // reads FF xx, skipping fill bytes
+		b, err := r.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		if b != 0xFF {
+			return 0, errBadJPEG
+		}
+		for {
+			m, err := r.ReadByte()
+			if err != nil {
+				return 0, err
+			}
+			if m != 0xFF {
+				return m, nil
+			}
+		}
+	}
+	m, err := marker()
+	for {
+		if err != nil {
+			if err == errBadJPEG {
+				return nil, nil // resync on the next start of image
+			}
+			return nil, err
+		}
+		buf = append(buf, 0xFF, m)
+		switch {
+		case m == 0xD9:
+			return buf, nil
+		case m == 0x01 || (m >= 0xD0 && m <= 0xD7):
+			m, err = marker()
+			continue
+		}
+		var lb [2]byte
+		if _, err = io.ReadFull(r, lb[:]); err != nil {
+			return nil, err
+		}
+		n := int(lb[0])<<8 | int(lb[1])
+		if n < 2 || len(buf)+n > maxFrame {
+			return nil, nil
+		}
+		buf = append(buf, lb[0], lb[1])
+		seg := make([]byte, n-2)
+		if _, err = io.ReadFull(r, seg); err != nil {
+			return nil, err
+		}
+		buf = append(buf, seg...)
+		if m != 0xDA {
+			m, err = marker()
+			continue
+		}
+		// entropy-coded data until the next real marker
+		for {
+			b, e := r.ReadByte()
+			if e != nil {
+				return nil, e
+			}
+			if b != 0xFF {
+				buf = append(buf, b)
+				if len(buf) > maxFrame {
+					return nil, nil
+				}
+				continue
+			}
+			nx, e := r.ReadByte()
+			if e != nil {
+				return nil, e
+			}
+			for nx == 0xFF { // fill bytes
+				if nx, e = r.ReadByte(); e != nil {
+					return nil, e
+				}
+			}
+			if nx == 0x00 || (nx >= 0xD0 && nx <= 0xD7) {
+				buf = append(buf, 0xFF, nx)
+				continue
+			}
+			m, err = nx, nil
+			break
+		}
+	}
+}
+
+var errBadJPEG = &ffError{"bad JPEG"}

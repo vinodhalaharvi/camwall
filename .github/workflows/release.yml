@@ -1,0 +1,38 @@
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the v (e.g. 0.1.0)"
+        required: true
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - run: make test
+      - name: Build binaries
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          mkdir dist
+          for t in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os=${t%/*}; arch=${t#*/}; d=camwall_${V}_${os}_${arch}
+            mkdir -p dist/$d
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$V" -o dist/$d/camwall ./cmd/camwall
+            cp README.md LICENSE dist/$d/
+            tar -C dist -czf dist/$d.tar.gz $d
+          done
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ inputs.version }}
+        run: |
+          gh release create "v$V" --target "$(git rev-parse HEAD)" --title "camwall $V" \
+            --notes-file .github/release-notes.md dist/*.tar.gz dist/checksums.txt

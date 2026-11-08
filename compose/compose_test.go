@@ -1,0 +1,90 @@
+package compose
+
+import (
+	"math"
+	"strings"
+	"testing"
+
+	"github.com/vinodhalaharvi/camwall/feeds"
+	"github.com/vinodhalaharvi/camwall/layout"
+)
+
+func wallOf(t *testing.T, aspects []float64, screen float64) (layout.Wall, []feeds.Feed) {
+	t.Helper()
+	lf := make([]layout.Feed, len(aspects))
+	fs := make([]feeds.Feed, len(aspects))
+	for i, a := range aspects {
+		lf[i] = layout.Feed{Aspect: a, Weight: 1}
+		fs[i] = feeds.New("rtsp://10.0.0.1/cam" + string(rune('a'+i)))
+		fs[i].Aspect = a
+	}
+	sv, err := layout.Solve(lf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sv.Fit(screen), fs
+}
+
+func TestPlace(t *testing.T) {
+	aspects := []float64{16.0 / 9, 16.0 / 9, 16.0 / 9, 4.0 / 3, 4.0 / 3, 1, 9.0 / 16}
+	for _, o := range []Options{
+		{Width: 1920, Height: 1080, Gutter: 4},
+		{Width: 1280, Height: 720, Gutter: 0},
+		{Width: 1080, Height: 1920, Gutter: 6},
+	} {
+		w, fs := wallOf(t, aspects, float64(o.Width)/float64(o.Height))
+		rs := Place(w, fs, o)
+		for i, r := range rs {
+			if r.X%2 != 0 || r.Y%2 != 0 || r.W%2 != 0 || r.H%2 != 0 {
+				t.Errorf("%dx%d feed %d: odd rectangle %+v", o.Width, o.Height, i, r)
+			}
+			if r.X < 0 || r.Y < 0 || r.X+r.W > o.Width || r.Y+r.H > o.Height {
+				t.Errorf("%dx%d feed %d: off screen %+v", o.Width, o.Height, i, r)
+			}
+			if got := float64(r.W) / float64(r.H); math.Abs(got-aspects[i])/aspects[i] > 0.03 {
+				t.Errorf("%dx%d feed %d: shape %.3f, feed is %.3f", o.Width, o.Height, i, got, aspects[i])
+			}
+			for j, q := range rs[i+1:] {
+				if r.X < q.X+q.W && q.X < r.X+r.W && r.Y < q.Y+q.H && q.Y < r.Y+r.H {
+					t.Errorf("%dx%d feeds %d and %d overlap", o.Width, o.Height, i, i+1+j)
+				}
+			}
+		}
+	}
+}
+
+func TestArgs(t *testing.T) {
+	w, fs := wallOf(t, []float64{16.0 / 9, 4.0 / 3}, 16.0/9)
+	fs = append(fs, feeds.New("promo.gif"))
+	fs[2].Aspect = 1
+	w2, _ := layout.Solve([]layout.Feed{{Aspect: 16.0 / 9, Weight: 1}, {Aspect: 4.0 / 3, Weight: 1}, {Aspect: 1, Weight: 1}})
+	w = w2.Fit(16.0 / 9)
+	o := Options{Width: 1280, Height: 720, FPS: 15, Gutter: 4, Background: "black", Output: "-", CRF: 23, Start: 1700000000.5}
+	a := strings.Join(Args(w, fs, o), " ")
+	for _, want := range []string{
+		"-copyts",
+		"-use_wallclock_as_timestamps 1 -thread_queue_size 64 -analyzeduration",
+		"setpts=PTS-1700000000.500000/TB,fps=15",
+		"setpts=PTS-STARTPTS+(RTCSTART/1000000-1700000000.500000)/TB",
+		"color=c=black:s=1280x720:r=15",
+		"-f mpegts pipe:1",
+	} {
+		if !strings.Contains(a, want) {
+			t.Errorf("args lack %q:\n%s", want, a)
+		}
+	}
+	for out, want := range map[string]string{"-": "mpegts", "rtsp://h/wall": "rtsp", "rtmp://h/live/x": "flv",
+		"srt://h:9000": "mpegts", "wall.m3u8": "hls", "wall.ts": "mpegts", "wall.mp4": ""} {
+		if got := OutputFormat(out); got != want {
+			t.Errorf("OutputFormat(%q) = %q, want %q", out, got, want)
+		}
+	}
+}
+
+func TestQuote(t *testing.T) {
+	got := Quote("ffmpeg", []string{"-i", "rtsp://a:b@h/s", "-filter_complex", "[0:v]scale=2:2[o]", "it's"})
+	want := `ffmpeg -i rtsp://a:b@h/s -filter_complex '[0:v]scale=2:2[o]' 'it'\''s'`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
