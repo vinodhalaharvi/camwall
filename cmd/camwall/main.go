@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/vinodhalaharvi/camwall/compose"
 	"github.com/vinodhalaharvi/camwall/feeds"
 	"github.com/vinodhalaharvi/camwall/layout"
+	"github.com/vinodhalaharvi/camwall/onvif"
 	"github.com/vinodhalaharvi/camwall/wall"
 )
 
@@ -31,24 +33,36 @@ var version = "dev"
 const usage = `camwall puts every camera feed on one gap-free wall.
 
 Usage:
-  camwall serve  [flags] SOURCE...   watch the wall in a browser
-  camwall stream [flags] SOURCE...   combine the feeds into one video with FFmpeg
-  camwall plan   [flags] SOURCE...   print the wall for a screen shape
-  camwall laws                       verify the layout algebra against brute force
+  camwall serve    [flags] SOURCE...   watch the wall in a browser
+  camwall stream   [flags] SOURCE...   combine the feeds into one video with FFmpeg
+  camwall plan     [flags] SOURCE...   print the wall for a screen shape
+  camwall discover [flags]             find ONVIF cameras and print their RTSP addresses
+  camwall devices                      list this computer's cameras and screens
+  camwall laws                         verify the layout algebra against brute force
   camwall version
 
-A SOURCE is a camera or stream URL (rtsp://, rtmp://, srt://, udp://, http(s)://
-including HLS .m3u8), a video file (looped), a GIF, or a still image. Instead of
-listing sources, pass -f FILE with one source per line:
+A SOURCE can be:
+  rtsp://user:pass@192.168.1.20/stream1   an IP camera (RTSP, RTMP, SRT, UDP, HTTP/MJPEG)
+  https://example.com/live/index.m3u8     an HLS or other network stream
+  https://www.youtube.com/watch?v=…        a web video or live stream (needs yt-dlp)
+  lobby.mp4, promo.gif, logo.png          video files (looped), animations, pictures
+  webcam, webcam:1, screen                this computer's cameras and screens
+  v4l2:/dev/video2, "dshow:video=NAME"    any FFmpeg capture device, as FORMAT:TARGET
+Pictures in TIFF, BMP or HEIC are converted for browsers; animated GIF, PNG and
+WebP play. Anything else FFmpeg reads works too.
 
+Instead of listing sources, pass -f FILE with one per line, and options:
   rtsp://user:pass@192.168.1.20/stream1  name=Front door  weight=2
-  rtsp://192.168.1.21/stream1            name=Register
+  rtsp://192.168.1.21/live               transport=udp name=Register
+  rtsp://192.168.1.22/fisheye            filter=v360=fisheye:e:ih_fov=180:iv_fov=180 name=Ceiling
+  "dshow:video=Integrated Camera"        size=1280x720 fps=30 name=Desk
   floorplan.png                          aspect=4:3 name=Floor plan
+weight=N asks for N times the area; aspect=W:H skips probing; transport= is
+auto (TCP, else UDP), tcp or udp; filter= is any FFmpeg video filter (crop,
+rotate, dewarp); format=, size= and fps= set capture options; name= takes the
+rest of the line.
 
-weight=N asks for N times the area of the other feeds, aspect=W:H skips probing,
-and name= takes the rest of the line.
-
-Flags for all commands:
+Flags for serve, stream and plan:
   -f FILE          read sources from FILE
   -ffmpeg PATH     FFmpeg to use (default: ffmpeg on your PATH)
 
@@ -69,17 +83,26 @@ stream flags:
   -gutter PX       space between feeds (default 4)
   -bg COLOR        background (default black)
   -labels          draw each feed's name (needs FFmpeg built with drawtext)
-  -crf N           x264 quality, lower is better (default 23)
+  -audio N         include the sound of feed N (numbered from 1)
+  -encoder NAME    video encoder: libx264 (default), libx265, h264_videotoolbox,
+                   h264_nvenc, h264_qsv …
+  -crf N           x264/x265 quality, lower is better (default 23)
+  -bitrate RATE    bitrate for other encoders (default 6M)
   -dry-run         print the FFmpeg command instead of running it
   -once            don't restart FFmpeg when it stops
 
 plan flags:
   -ratio R         screen shape: 16:9, 21:9, 9:16, 1.6 … (default 16:9)
 
+discover flags:
+  -user NAME, -password PW   the cameras' login (most cameras need one)
+  -sub             print each camera's sub-stream (lighter) instead of its main stream
+  -timeout D       how long to listen for answers (default 3s)
+
 Examples:
-  camwall serve rtsp://192.168.1.20/stream1 rtsp://192.168.1.21/stream1 logo.png
+  camwall discover -user admin -password secret > cams.txt
   camwall serve -f cams.txt -addr :7788 -password s3cret
-  camwall stream -f cams.txt -o - | vlc -
+  camwall stream -f cams.txt -audio 1 -o - | vlc -
   camwall stream -f cams.txt -o rtsp://localhost:8554/wall
 `
 
@@ -101,8 +124,15 @@ func main() {
 		err = plan(args[1:])
 	case args[0] == "laws":
 		err = laws()
+	case args[0] == "devices":
+		err = devices()
+	case args[0] == "discover":
+		err = discover(args[1:])
 	default:
 		err = fmt.Errorf("unknown command %q (try camwall help)", args[0])
+	}
+	if tmpDir != "" {
+		os.RemoveAll(tmpDir)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "camwall:", err)
@@ -142,13 +172,19 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// load reads the sources, finds FFmpeg and probes every feed's shape.
-func (c *common) load(srcs []string, needFFmpeg bool) ([]feeds.Feed, string, error) {
+// tmpDir holds pictures converted for browsers; removed when camwall exits.
+var tmpDir string
+
+// load reads the sources, finds FFmpeg (and ffprobe and yt-dlp) and gets
+// every feed ready: pictures converted where needed, web pages resolved,
+// shapes probed.
+func (c *common) load(srcs []string, needFFmpeg bool) ([]feeds.Feed, feeds.Tools, error) {
+	var t feeds.Tools
 	var fs []feeds.Feed
 	if c.file != "" {
 		list, err := feeds.ReadFile(c.file)
 		if err != nil {
-			return nil, "", err
+			return nil, t, err
 		}
 		fs = append(fs, list...)
 	}
@@ -156,48 +192,61 @@ func (c *common) load(srcs []string, needFFmpeg bool) ([]feeds.Feed, string, err
 		fs = append(fs, feeds.New(s))
 	}
 	if len(fs) == 0 {
-		return nil, "", errors.New("no sources: list camera URLs or files, or use -f FILE (see camwall help)")
+		return nil, t, errors.New("no sources: list camera URLs or files, or use -f FILE (see camwall help)")
 	}
 	if len(fs) > layout.MaxFeeds {
-		return nil, "", fmt.Errorf("%d sources; one wall takes at most %d (run a second wall for the rest)", len(fs), layout.MaxFeeds)
+		return nil, t, fmt.Errorf("%d sources; one wall takes at most %d (run a second wall for the rest)", len(fs), layout.MaxFeeds)
 	}
 	for _, f := range fs {
-		if feeds.Scheme(f.Src) == "" {
+		if f.IsFile() {
 			if _, err := os.Stat(f.Src); err != nil {
-				return nil, "", fmt.Errorf("%s: %w", f.Src, err)
+				return nil, t, fmt.Errorf("%s: %w", f.Src, err)
 			}
 		}
 	}
 	ff, err := exec.LookPath(c.ffmpeg)
 	if err != nil {
 		if needFFmpeg {
-			return nil, "", fmt.Errorf("FFmpeg not found (%s); install it, e.g. brew install ffmpeg", c.ffmpeg)
+			return nil, t, fmt.Errorf("FFmpeg not found (%s); install it, e.g. brew install ffmpeg", c.ffmpeg)
 		}
-		ff = c.ffmpeg
+		for i := range fs {
+			if !(fs[i].Aspect > 0) {
+				fs[i].Aspect = 16.0 / 9
+			}
+		}
+		return fs, feeds.Tools{FFmpeg: c.ffmpeg}, nil
 	}
+	t.FFmpeg = ff
 	probe := "ffprobe"
 	if dir := strings.TrimSuffix(ff, "ffmpeg"); dir != ff {
 		if _, err := os.Stat(dir + "ffprobe"); err == nil {
 			probe = dir + "ffprobe"
 		}
 	}
-	if _, err := exec.LookPath(probe); err != nil {
-		fmt.Fprintln(os.Stderr, "camwall: ffprobe not found; assuming 16:9 for feeds without aspect=")
-		for i := range fs {
-			if !(fs[i].Aspect > 0) {
-				fs[i].Aspect, fs[i].Note = 16.0/9, "ffprobe not found; assuming 16:9"
-			}
-		}
+	if p, err := exec.LookPath(probe); err == nil {
+		t.FFprobe = p
 	} else {
-		fmt.Fprintf(os.Stderr, "Reading the size of %d feed%s…\n", len(fs), plural(len(fs)))
-		feeds.ProbeAll(probe, fs, 12*time.Second)
+		fmt.Fprintln(os.Stderr, "camwall: ffprobe not found; assuming 16:9 for feeds without aspect=")
+	}
+	if y, err := exec.LookPath("yt-dlp"); err == nil {
+		t.YtDlp = y
+	}
+	if tmpDir == "" {
+		if tmpDir, err = os.MkdirTemp("", "camwall-"); err != nil {
+			return nil, t, err
+		}
+	}
+	t.TempDir = tmpDir
+	fmt.Fprintf(os.Stderr, "Getting %d feed%s ready…\n", len(fs), plural(len(fs)))
+	if err := feeds.Prepare(fs, t, 20*time.Second); err != nil {
+		return nil, t, err
 	}
 	for i, f := range fs {
 		if f.Note != "" {
 			fmt.Fprintf(os.Stderr, "  feed %d (%s): %s\n", i+1, f.Name, f.Note)
 		}
 	}
-	return fs, ff, nil
+	return fs, t, nil
 }
 
 func plural(n int) string {
@@ -247,11 +296,11 @@ func serve(args []string) error {
 	if *fps < 1 || *fps > 30 {
 		return errors.New("-fps: 1 to 30")
 	}
-	feedsList, ff, err := c.load(srcs, true)
+	feedsList, tools, err := c.load(srcs, true)
 	if err != nil {
 		return err
 	}
-	srv := wall.New(*title, ff, feedsList, *fps, *maxSide, 5)
+	srv := wall.New(*title, tools, feedsList, *fps, *maxSide, 5)
 	base := make([]float64, len(feedsList))
 	all := make([]int, len(feedsList))
 	for i, f := range feedsList {
@@ -368,6 +417,9 @@ func stream(args []string) error {
 	font := fs.String("font", "", "")
 	crf := fs.Int("crf", 23, "")
 	dry := fs.Bool("dry-run", false, "")
+	audio := fs.Int("audio", 0, "")
+	encoder := fs.String("encoder", "libx264", "")
+	bitrate := fs.String("bitrate", "", "")
 	once := fs.Bool("once", false, "")
 	srcs, err := parse(fs, args)
 	if err != nil {
@@ -383,23 +435,44 @@ func stream(args []string) error {
 	if *gutter < 0 || *gutter > 64 {
 		return errors.New("-gutter: 0 to 64")
 	}
-	feedsList, ff, err := c.load(srcs, !*dry)
+	feedsList, tools, err := c.load(srcs, !*dry)
 	if err != nil {
 		return err
+	}
+	if *audio < 0 || *audio > len(feedsList) {
+		return fmt.Errorf("-audio %d: feeds are numbered 1 to %d", *audio, len(feedsList))
+	}
+	if *audio > 0 && !feedsList[*audio-1].Audio {
+		return fmt.Errorf("-audio %d: %s has no sound (or it could not be read)", *audio, feedsList[*audio-1].Name)
 	}
 	sv, err := solve(feedsList)
 	if err != nil {
 		return err
 	}
 	o := compose.Options{Width: w, Height: h, FPS: *fps, Gutter: *gutter, Background: *bg,
-		Labels: *labels, Font: *font, Output: *out, CRF: *crf}
+		Labels: *labels, Font: *font, Output: *out, CRF: *crf, Encoder: *encoder, Bitrate: *bitrate, Audio: *audio}
 	wl := sv.Fit(float64(w) / float64(h))
-	argsNow := func() []string {
+	// web pages are resolved again on every start: their media URLs expire
+	argsNow := func() ([]string, error) {
+		opened := make([]feeds.Feed, len(feedsList))
+		for i, f := range feedsList {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			g, err := f.Opened(ctx, tools)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("feed %d (%s): %w", i+1, f.Name, err)
+			}
+			opened[i] = g
+		}
 		o.Start = float64(time.Now().UnixMicro()) / 1e6
-		return compose.Args(wl, feedsList, o)
+		return compose.Args(wl, opened, o), nil
 	}
 	if *dry {
-		fmt.Println(compose.Quote("ffmpeg", argsNow()))
+		a, err := argsNow()
+		if err != nil {
+			return err
+		}
+		fmt.Println(compose.Quote("ffmpeg", a))
 		return nil
 	}
 	if *out != "-" {
@@ -410,7 +483,18 @@ func stream(args []string) error {
 	backoff := 2 * time.Second
 	for {
 		start := time.Now()
-		cmd := exec.Command(ff, argsNow()...)
+		args, err := argsNow()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "camwall: %v; retrying in %v\n", err, backoff)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(backoff):
+			}
+			backoff = min(2*backoff, 30*time.Second)
+			continue
+		}
+		cmd := exec.Command(tools.FFmpeg, args...)
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		if err := cmd.Start(); err != nil {
 			return err
@@ -568,6 +652,104 @@ func laws() error {
 	}
 	if !ok {
 		return errors.New("a law failed")
+	}
+	return nil
+}
+
+// ---------- devices ----------
+
+// devices lists the cameras and screens FFmpeg can capture on this computer.
+func devices() error {
+	ff, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return errors.New("FFmpeg not found; install it, e.g. brew install ffmpeg")
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		out, _ := exec.Command(ff, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", "").CombinedOutput()
+		fmt.Println("Use webcam:N for a camera and screen:N for a screen, numbered as below.")
+		printDeviceLines(string(out))
+	case "windows":
+		out, _ := exec.Command(ff, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy").CombinedOutput()
+		fmt.Println(`Use "dshow:video=NAME" for a camera (in quotes in a feeds file); screen for the desktop.`)
+		printDeviceLines(string(out))
+	default:
+		matches, _ := filepath.Glob("/dev/video*")
+		if len(matches) == 0 {
+			fmt.Println("No cameras found (/dev/video*).")
+		}
+		for _, m := range matches {
+			fmt.Printf("  v4l2:%s   (or webcam:%s)\n", m, strings.TrimPrefix(m, "/dev/video"))
+		}
+		fmt.Println("Use screen for the X display ($DISPLAY).")
+	}
+	return nil
+}
+
+func printDeviceLines(out string) {
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, "] "); i >= 0 && !strings.Contains(line, "Error") && !strings.Contains(line, "dummy") {
+			fmt.Println("  " + strings.TrimSpace(line[i+2:]))
+		}
+	}
+}
+
+// ---------- discover ----------
+
+// discover finds ONVIF cameras on the network and prints a feeds-file line
+// for each, using the sub-stream when asked (lighter, plenty for a wall).
+func discover(args []string) error {
+	fs := newFlags("discover")
+	user := fs.String("user", "", "")
+	pass := fs.String("password", "", "")
+	wait := fs.Duration("timeout", 3*time.Second, "")
+	sub := fs.Bool("sub", false, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Looking for ONVIF cameras for %v…\n", *wait)
+	ds, err := onvif.Discover(context.Background(), onvif.MulticastAddr, *wait)
+	if err != nil {
+		return err
+	}
+	if len(ds) == 0 {
+		fmt.Fprintln(os.Stderr, "No cameras answered. Check that ONVIF is turned on in each camera's settings, and that this computer is on the same network.")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Found %d. Lines for a feeds file (camwall serve -f cams.txt):\n\n", len(ds))
+	c := &onvif.Client{User: *user, Password: *pass}
+	authFailed := false
+	for _, d := range ds {
+		name := d.Name
+		if name == "" {
+			name = d.Addr
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ss, err := c.Streams(ctx, d.XAddr)
+		cancel()
+		switch {
+		case err == onvif.ErrAuth:
+			authFailed = true
+			fmt.Printf("# %s (%s %s): needs the camera's user name and password\n", name, d.Addr, d.Model)
+		case err != nil:
+			fmt.Printf("# %s (%s %s): %v\n", name, d.Addr, d.Model, err)
+		case len(ss) == 0:
+			fmt.Printf("# %s (%s): no RTSP streams listed\n", name, d.Addr)
+		default:
+			pick := ss[0]
+			if *sub {
+				pick = ss[len(ss)-1]
+			}
+			fmt.Printf("%s  name=%s\n", pick.URI, name)
+			for _, s := range ss {
+				if s.URI != pick.URI {
+					fmt.Printf("#   also %s (%dx%d): %s\n", s.Profile, s.Width, s.Height, s.URI)
+				}
+			}
+		}
+	}
+	if authFailed && *user == "" {
+		fmt.Fprintln(os.Stderr, "\nSome cameras need a login: run again with -user NAME -password PW.")
 	}
 	return nil
 }

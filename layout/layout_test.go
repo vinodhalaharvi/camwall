@@ -199,3 +199,15 @@ func TestNearlyEqualShapesShareAKind(t *testing.T) {
 	s, _ := Solve(feeds)
 	checkGeometry(t, feeds, 16.0/9, s.Fit(16.0/9)) // tiles keep exact shapes
 }
+
+func TestExtremeShapes(t *testing.T) {
+	// a 12:1 panoramic camera and a 1:10 strip used to fall outside the range
+	feeds := []Feed{{12, 1}, {16.0 / 9, 1}, {16.0 / 9, 1}, {0.1, 1}}
+	s, err := Solve(feeds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, screen := range []float64{16.0 / 9, 32.0 / 9} {
+		checkGeometry(t, feeds, screen, s.Fit(screen))
+	}
+}

@@ -242,6 +242,21 @@ func NewAlgebra(kinds []Feed, gr *Grades) dyna.Algebra[Step, dyna.Vec[Cell]] {
 	return dyna.Lift(dyna.Product(dyna.Count[Step](), dyna.TopK(K, Score(kinds))), gr.grading(kinds))
 }
 
+// gradesFor covers the usual range of shapes (1:8 to 8:1), widened when a
+// feed is itself extreme (a 12:1 panoramic camera), keeping the same
+// resolution per bucket.
+func gradesFor(kinds []Feed) *Grades {
+	r := MaxAspect
+	for _, k := range kinds {
+		r = math.Max(r, 2*math.Max(k.Aspect, 1/k.Aspect))
+	}
+	b := Buckets
+	if r > MaxAspect {
+		b = int(math.Ceil(float64(Buckets) * math.Log(r) / math.Log(MaxAspect)))
+	}
+	return NewGrades(b, r)
+}
+
 // Solved is a solved wall: every shape it can take, indexed by aspect ratio,
 // so fitting it to a screen of any shape is a lookup, not a new search.
 type Solved struct {
@@ -311,7 +326,7 @@ func SolveUpTo(feeds []Feed, exhaustive int) (*Solved, error) {
 	for _, k := range kindOf {
 		goal[k]++
 	}
-	gr := NewGrades(Buckets, MaxAspect)
+	gr := gradesFor(kinds)
 	root, st := dyna.Dyna(NewAlgebra(kinds, gr), SplitsUpTo(len(kinds), exhaustive), goal)
 	if len(root.NZ) == 0 {
 		return nil, errors.New("no wall fits: the feeds' shapes are too extreme")

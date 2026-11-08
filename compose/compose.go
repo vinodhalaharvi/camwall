@@ -26,8 +26,10 @@ type Options struct {
 	Font          string // font file for labels; empty lets FFmpeg choose
 	Output        string // file, URL, or "-" for MPEG-TS on stdout
 	Format        string // force the output container (-f); empty guesses
-	Encoder       string // video encoder; default libx264
-	CRF           int    // quality for libx264; lower is better
+	Encoder       string // video encoder; default libx264 (also libx265, h264_videotoolbox, h264_nvenc …)
+	CRF           int    // quality for libx264/libx265; lower is better
+	Bitrate       string // target bitrate for other encoders, e.g. 6M
+	Audio         int    // feed number (from 1) whose sound goes into the stream; 0 for none
 	// Start is the Unix time in seconds at which FFmpeg is launched. Inputs
 	// are stamped with wall-clock time, and the wall's timeline starts here.
 	Start float64
@@ -77,11 +79,11 @@ func Filter(rects []Rect, fs []feeds.Feed, o Options) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "color=c=%s:s=%dx%d:r=%d[bg0];", o.Background, o.Width, o.Height, o.FPS)
 	for i, r := range rects {
-		shift := fmt.Sprintf("PTS-%.6f/TB", o.Start)
-		if fs[i].Kind != feeds.Live {
-			shift = fmt.Sprintf("PTS-STARTPTS+(RTCSTART/1000000-%.6f)/TB", o.Start)
+		fmt.Fprintf(&b, "[%d:v]setpts=%s,fps=%d,", i, shift(fs[i], o), o.FPS)
+		if fs[i].Filter != "" {
+			b.WriteString(fs[i].Filter + ",")
 		}
-		fmt.Fprintf(&b, "[%d:v]setpts=%s,fps=%d,scale=%d:%d:flags=bilinear,setsar=1,format=yuv420p", i, shift, o.FPS, r.W, r.H)
+		fmt.Fprintf(&b, "scale=%d:%d:flags=bilinear,setsar=1,format=yuv420p", r.W, r.H)
 		if o.Labels {
 			size := max(12, min(32, r.H/14))
 			font := ""
@@ -93,6 +95,9 @@ func Filter(rects []Rect, fs []feeds.Feed, o Options) string {
 		}
 		fmt.Fprintf(&b, "[v%d];", i)
 	}
+	if a := o.Audio - 1; a >= 0 && a < len(fs) {
+		fmt.Fprintf(&b, "[%d:a]asetpts=%s,aresample=async=1000,aformat=sample_rates=48000:channel_layouts=stereo[aout];", a, shift(fs[a], o))
+	}
 	for i, r := range rects {
 		last := i == len(rects)-1
 		fmt.Fprintf(&b, "[bg%d][v%d]overlay=x=%d:y=%d:eof_action=repeat:repeatlast=1", i, i, r.X, r.Y)
@@ -103,6 +108,14 @@ func Filter(rects []Rect, fs []feeds.Feed, o Options) string {
 		}
 	}
 	return b.String()
+}
+
+// shift moves a feed's timestamps onto the wall's timeline (see Filter).
+func shift(f feeds.Feed, o Options) string {
+	if f.Kind == feeds.Live {
+		return fmt.Sprintf("PTS-%.6f/TB", o.Start)
+	}
+	return fmt.Sprintf("PTS-STARTPTS+(RTCSTART/1000000-%.6f)/TB", o.Start)
 }
 
 // OutputFormat picks the container for a destination.
@@ -141,11 +154,29 @@ func Args(w layout.Wall, fs []feeds.Feed, o Options) []string {
 	if enc == "" {
 		enc = "libx264"
 	}
-	args = append(args, "-filter_complex", Filter(rects, fs, o), "-map", "[out]", "-an", "-c:v", enc)
-	if enc == "libx264" {
-		args = append(args, "-preset", "veryfast", "-tune", "zerolatency", "-crf", strconv.Itoa(o.CRF))
+	args = append(args, "-filter_complex", Filter(rects, fs, o), "-map", "[out]")
+	if a := o.Audio - 1; a >= 0 && a < len(fs) {
+		args = append(args, "-map", "[aout]", "-c:a", "aac", "-b:a", "128k")
+	} else {
+		args = append(args, "-an")
 	}
-	args = append(args, "-pix_fmt", "yuv420p", "-g", strconv.Itoa(2*o.FPS), "-r", strconv.Itoa(o.FPS))
+	args = append(args, "-c:v", enc)
+	switch enc {
+	case "libx264":
+		args = append(args, "-preset", "veryfast", "-tune", "zerolatency", "-crf", strconv.Itoa(o.CRF))
+	case "libx265":
+		args = append(args, "-preset", "veryfast", "-tune", "zerolatency", "-crf", strconv.Itoa(o.CRF+5), "-tag:v", "hvc1")
+	default:
+		br := o.Bitrate
+		if br == "" {
+			br = "6M"
+		}
+		args = append(args, "-b:v", br)
+	}
+	if !strings.Contains(enc, "videotoolbox") && !strings.Contains(enc, "vaapi") && !strings.Contains(enc, "qsv") {
+		args = append(args, "-pix_fmt", "yuv420p")
+	}
+	args = append(args, "-g", strconv.Itoa(2*o.FPS), "-r", strconv.Itoa(o.FPS))
 	format := o.Format
 	if format == "" {
 		format = OutputFormat(o.Output)

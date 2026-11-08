@@ -20,7 +20,7 @@ import (
 type Hub struct {
 	ID      int
 	Feed    feeds.Feed
-	FFmpeg  string
+	Tools   feeds.Tools
 	FPS     int
 	MaxSide int // longest side of frames sent to browsers
 	Quality int // JPEG quality for FFmpeg's -q:v, 2 (best) … 31
@@ -99,12 +99,15 @@ func (h *Hub) Subscribe(ch chan struct{}) func() {
 	}
 }
 
-func (h *Hub) args() []string {
+func (h *Hub) args(f feeds.Feed) []string {
 	scale := "scale='if(gte(iw,ih),min(" + strconv.Itoa(h.MaxSide) + ",iw),-2)':'if(gte(iw,ih),-2,min(" + strconv.Itoa(h.MaxSide) + ",ih))'"
+	vf := "fps=" + strconv.Itoa(h.FPS) + "," + scale
+	if f.Filter != "" {
+		vf = f.Filter + "," + vf
+	}
 	a := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
-	a = append(a, h.Feed.InputArgs(h.FPS)...)
-	return append(a, "-an", "-vf", "fps="+strconv.Itoa(h.FPS)+","+scale,
-		"-c:v", "mjpeg", "-q:v", strconv.Itoa(h.Quality), "-f", "image2pipe", "pipe:1")
+	a = append(a, f.InputArgs(h.FPS)...)
+	return append(a, "-an", "-vf", vf, "-c:v", "mjpeg", "-q:v", strconv.Itoa(h.Quality), "-f", "image2pipe", "pipe:1")
 }
 
 func (h *Hub) run(ctx context.Context) {
@@ -142,7 +145,14 @@ func (t *tail) Write(p []byte) (int, error) {
 }
 
 func (h *Hub) once(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, h.FFmpeg, h.args()...)
+	// a web page's media URL expires: resolve it again on every start
+	octx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	f, err := h.Feed.Opened(octx, h.Tools)
+	cancel()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, h.Tools.FFmpeg, h.args(f)...)
 	errs := &tail{}
 	cmd.Stderr = errs
 	out, err := cmd.StdoutPipe()

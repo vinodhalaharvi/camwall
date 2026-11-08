@@ -34,18 +34,19 @@ type Server struct {
 	order []string
 }
 
-// Static reports whether a feed can go straight to the browser as a file:
-// a local picture or GIF, which the browser shows (and animates) itself.
+// Static reports whether a feed goes straight to the browser as a file: a
+// local picture or animation the browser shows (and animates) itself, or a
+// JPEG copy of a picture it cannot show (feeds.Prepare makes it).
 func Static(f feeds.Feed) bool {
-	return (f.Kind == feeds.Image || f.Kind == feeds.GIF) && feeds.Scheme(f.Src) == ""
+	return f.Browser != ""
 }
 
 // New makes a server and a hub for every moving feed.
-func New(title, ffmpeg string, fs []feeds.Feed, fps, maxSide, quality int) *Server {
+func New(title string, t feeds.Tools, fs []feeds.Feed, fps, maxSide, quality int) *Server {
 	s := &Server{Title: title, Feeds: fs, Hubs: make([]*Hub, len(fs)), cache: map[string]*layout.Solved{}}
 	for i, f := range fs {
 		if !Static(f) {
-			s.Hubs[i] = &Hub{ID: i, Feed: f, FFmpeg: ffmpeg, FPS: fps, MaxSide: maxSide, Quality: quality, Linger: 15 * time.Second}
+			s.Hubs[i] = &Hub{ID: i, Feed: f, Tools: t, FPS: fps, MaxSide: maxSide, Quality: quality, Linger: 15 * time.Second}
 		}
 	}
 	return s
@@ -215,7 +216,7 @@ func (s *Server) media(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, s.Feeds[id].Src)
+	http.ServeFile(w, r, s.Feeds[id].Browser)
 }
 
 // snapshot is the latest frame of a moving feed as a JPEG.

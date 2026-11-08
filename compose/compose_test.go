@@ -88,3 +88,26 @@ func TestQuote(t *testing.T) {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
 }
+
+func TestAudioEncoderFilter(t *testing.T) {
+	sv, _ := layout.Solve([]layout.Feed{{Aspect: 16.0 / 9, Weight: 1}, {Aspect: 16.0 / 9, Weight: 1}})
+	fs := []feeds.Feed{feeds.New("rtsp://h/a"), feeds.New("rtsp://h/b")}
+	fs[0].Aspect, fs[1].Aspect = 16.0/9, 16.0/9
+	fs[1].Filter = "hflip"
+	o := Options{Width: 1280, Height: 720, FPS: 10, Background: "black", Output: "x.mkv", CRF: 23, Audio: 2,
+		Encoder: "h264_videotoolbox", Bitrate: "8M", Start: 1}
+	a := strings.Join(Args(sv.Fit(16.0/9), fs, o), " ")
+	for _, want := range []string{"[1:a]asetpts=PTS-1.000000/TB,aresample", "-map [aout] -c:a aac", "-c:v h264_videotoolbox -b:v 8M",
+		"fps=10,hflip,scale="} {
+		if !strings.Contains(a, want) {
+			t.Errorf("args lack %q:\n%s", want, a)
+		}
+	}
+	if strings.Contains(a, " -an ") || strings.Contains(a, "-pix_fmt yuv420p") {
+		t.Errorf("unexpected -an or -pix_fmt with videotoolbox:\n%s", a)
+	}
+	o.Audio, o.Encoder = 0, ""
+	if a := strings.Join(Args(sv.Fit(16.0/9), fs, o), " "); !strings.Contains(a, " -an ") || !strings.Contains(a, "libx264") {
+		t.Errorf("default: %s", a)
+	}
+}
