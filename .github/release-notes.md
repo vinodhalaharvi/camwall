@@ -3,10 +3,11 @@ Install with Homebrew (FFmpeg comes with it):
 brew install vinodhalaharvi/tap/camwall
 ```
 
-- `camwall serve` shows every camera on one gap-free wall in your browser: pin a feed to make it bigger, click one to fill the screen, share it on your network with a password.
-- `camwall stream` combines the feeds into one video with FFmpeg: open it in VLC, record it, or restream it over RTSP, RTMP, SRT or HLS.
-- `camwall plan` prints the wall for any screen shape; `camwall laws` checks the layout algebra against brute force.
+- `camwall serve` shows every camera on one gap-free wall in your browser: a settings panel for screen shape, which feeds show and how big, tap a feed to fill the screen, 🔊 to listen to one live, and a password to share it on your network.
+- `camwall stream` combines the feeds into one video with FFmpeg: open it in VLC, record it, restream it over RTSP, or go live on YouTube or Twitch over RTMP.
+- `camwall record` (or `serve -record`) keeps every feed's sound in time-stamped files, with a Recordings page to find any moment.
+- `camwall discover` finds ONVIF cameras on your network and prints their RTSP addresses; `camwall devices` lists this computer's cameras and screens.
 
-Sources can be RTSP cameras, network streams (RTMP, SRT, UDP, HLS), video files, GIFs and still images, up to 25 per wall.
+Sources: IP cameras (RTSP, RTMP, SRT, UDP, HTTP), HLS, YouTube and other web video (with yt-dlp), webcams and capture devices, video files, GIFs and pictures, up to 25 per wall.
 
-Binaries below are for macOS (Apple Silicon and Intel) and Linux (x86-64 and ARM64); they need FFmpeg 5 or later on your PATH. The macOS binaries are not notarised; if Gatekeeper blocks one, use Homebrew or run `xattr -d com.apple.quarantine camwall`.
+The binaries below are for macOS (Apple Silicon and Intel) and Linux (x86-64 and ARM64) and need FFmpeg 5 or later on your PATH. The macOS binaries are not notarised; if Gatekeeper blocks one, use Homebrew or run `xattr -d com.apple.quarantine camwall`.

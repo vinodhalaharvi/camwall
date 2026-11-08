@@ -14,14 +14,24 @@ camwall serve rtsp://192.168.1.20/stream1 rtsp://192.168.1.21/stream1 rtsp://192
 
 ## Install
 
-camwall needs [FFmpeg](https://ffmpeg.org) 5 or later; 8 or later plays animated WebP too. [yt-dlp](https://github.com/yt-dlp/yt-dlp) is optional, for YouTube and other web video. Build camwall with Go 1.24:
-
 ```sh
-brew install ffmpeg yt-dlp        # or your system's package manager
-go install github.com/vinodhalaharvi/camwall/cmd/camwall@latest
+brew install vinodhalaharvi/tap/camwall
 ```
 
-`camwall help` lists every command and option.
+That's all: Homebrew installs [FFmpeg](https://ffmpeg.org) with it. For YouTube, Twitch and other web video, also `brew install yt-dlp`. Homebrew works on Linux too.
+
+**On Linux without Homebrew**, install FFmpeg 5 or later from your package manager (`sudo apt install ffmpeg`, `sudo dnf install ffmpeg`, …), then either:
+
+```sh
+# with Go 1.24 or later
+go install github.com/vinodhalaharvi/camwall/cmd/camwall@latest
+
+# or from source
+git clone https://github.com/vinodhalaharvi/camwall
+cd camwall && make build && sudo mv camwall /usr/local/bin/
+```
+
+Ready-made binaries for Linux and macOS are on the [releases page](https://github.com/vinodhalaharvi/camwall/releases). Check it works with `camwall version`; `camwall help` lists every command and option.
 
 ## Find your cameras
 
