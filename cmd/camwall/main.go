@@ -253,10 +253,11 @@ func serve(args []string) error {
 	}
 	srv := wall.New(*title, ff, feedsList, *fps, *maxSide, 5)
 	base := make([]float64, len(feedsList))
+	all := make([]int, len(feedsList))
 	for i, f := range feedsList {
-		base[i] = f.Weight
+		base[i], all[i] = f.Weight, i
 	}
-	if _, err := srv.Solve(base); err != nil {
+	if _, err := srv.Solve(all, base); err != nil {
 		return err
 	}
 	h := srv.Handler()

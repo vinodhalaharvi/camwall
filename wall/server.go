@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,17 +51,19 @@ func New(title, ffmpeg string, fs []feeds.Feed, fps, maxSide, quality int) *Serv
 	return s
 }
 
-// Solve returns the solved wall for a set of weights, solving it once.
-func (s *Server) Solve(weights []float64) (*layout.Solved, error) {
-	key := fmt.Sprint(weights)
+// Solve returns the solved wall for the shown feeds (ids) with the given
+// weights (one per feed on the server), solving each combination once.
+// Tiles of the result refer to positions in ids.
+func (s *Server) Solve(ids []int, weights []float64) (*layout.Solved, error) {
+	key := fmt.Sprint(ids, weights)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sv, ok := s.cache[key]; ok {
 		return sv, nil
 	}
-	lf := make([]layout.Feed, len(s.Feeds))
-	for i, f := range s.Feeds {
-		lf[i] = layout.Feed{Aspect: f.Aspect, Weight: weights[i]}
+	lf := make([]layout.Feed, len(ids))
+	for i, id := range ids {
+		lf[i] = layout.Feed{Aspect: s.Feeds[id].Aspect, Weight: weights[id]}
 	}
 	sv, err := layout.Solve(lf)
 	if err != nil {
@@ -125,6 +128,30 @@ func (s *Server) apiLayout(w http.ResponseWriter, r *http.Request) {
 	for i, f := range s.Feeds {
 		weights[i] = f.Weight
 	}
+	ids := make([]int, 0, len(s.Feeds))
+	if q := r.URL.Query().Get("show"); q != "" {
+		seen := map[int]bool{}
+		for _, p := range strings.Split(q, ",") {
+			id, err := strconv.Atoi(p)
+			if err != nil || id < 0 || id >= len(s.Feeds) || seen[id] {
+				http.Error(w, "show: feed numbers from 0, each once", http.StatusBadRequest)
+				return
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		sort.Ints(ids)
+	} else {
+		for i := range s.Feeds {
+			ids = append(ids, i)
+		}
+	}
+	if len(ids) == 0 {
+		writeJSON(w, struct {
+			Tiles []layout.Tile `json:"tiles"`
+		}{[]layout.Tile{}})
+		return
+	}
 	if q := r.URL.Query().Get("weights"); q != "" {
 		parts := strings.Split(q, ",")
 		if len(parts) != len(weights) {
@@ -140,12 +167,15 @@ func (s *Server) apiLayout(w http.ResponseWriter, r *http.Request) {
 			weights[i] = math.Round(x*100) / 100
 		}
 	}
-	sv, err := s.Solve(weights)
+	sv, err := s.Solve(ids, weights)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 	wall := sv.Fit(aspect)
+	for i := range wall.Tiles {
+		wall.Tiles[i].Feed = ids[wall.Tiles[i].Feed]
+	}
 	writeJSON(w, struct {
 		Tiles    []layout.Tile `json:"tiles"`
 		Smallest float64       `json:"smallest"`
