@@ -4,17 +4,24 @@ Every camera feed on one gap-free wall: in your browser, or as one combined vide
 
 camwall is for a shop manager who wants all their cameras in one place. Give it IP cameras, network streams, web videos, the computer's own camera, video files, animations or a still image or two. It finds the arrangement that shows the smallest feed as large as possible on your screen, and no feed is cropped or stretched.
 
-![Eight cameras, a GIF and a still image on one wall](docs/wall.jpg)
+![Six pet cameras and a still photo on one wall](docs/wall.jpg)
 
 ```sh
 camwall serve rtsp://192.168.1.20/stream1 rtsp://192.168.1.21/stream1 rtsp://192.168.1.22/stream1 logo.png
 ```
 
-camwall needs [FFmpeg](https://ffmpeg.org) 5 or later. Build it with Go 1.24:
+![Dragging the screen shape: the wall re-solves on every frame](docs/demo.gif)
+
+## Install
+
+camwall needs [FFmpeg](https://ffmpeg.org) 5 or later; 8 or later plays animated WebP too. [yt-dlp](https://github.com/yt-dlp/yt-dlp) is optional, for YouTube and other web video. Build camwall with Go 1.24:
 
 ```sh
+brew install ffmpeg yt-dlp        # or your system's package manager
 go install github.com/vinodhalaharvi/camwall/cmd/camwall@latest
 ```
+
+`camwall help` lists every command and option.
 
 ## Find your cameras
 
@@ -77,6 +84,9 @@ camwall serve -f cams.txt -addr :7788 -password s3cret   # TVs, tablets and phon
 
 - **Settings** (S) opens a panel: pick a fixed screen shape for a TV of another shape, turn each feed on or off and set its size, and change the gap, background and names. Settings are kept in each browser.
 - **★** on a tile makes that feed bigger, and the wall re-solves around it.
+
+![Settings: the back yard set to 4×, and the wall re-solved around it](docs/settings.jpg)
+
 - **Click** a tile to fill the screen with it. Click again, or press Esc, to go back.
 - **Resize** the window, or turn a phone, and the wall re-arranges for the new shape.
 - **Full screen** (F) and **Hide bar** (K) turn a spare screen into a monitor wall. Open `/?kiosk` to start that way.
@@ -84,7 +94,16 @@ camwall serve -f cams.txt -addr :7788 -password s3cret   # TVs, tablets and phon
 
 - **🔊** on a tile with sound plays that camera live, one camera at a time, about a quarter of a second behind. **Stop** (M) in the bar ends it.
 
-![The front door pinned: the wall re-solves around it](docs/pinned.jpg)
+| Key | Does |
+|---|---|
+| S | open or close Settings |
+| F | full screen |
+| K | hide or show the bar (kiosk) |
+| N | show or hide names |
+| M | stop listening |
+| Esc | leave a zoomed camera, then kiosk, then Settings |
+
+Open `/?kiosk` to start with the bar hidden, or `/?nonames` to start without names.
 
 Each camera is opened once, however many people are watching, and only while someone is watching. All feeds reach the page over a single connection, so a wall of 20 cameras isn't limited by the browser's six connections per server. With `-password`, viewers sign in with the user name `camwall`.
 
@@ -104,6 +123,8 @@ recordings/03 Register/2026-11-08_14-15-00.m4a
 ```
 
 So "what happened at 14:37" is the 14:30 file, seven minutes in. The **Recordings** button on the wall opens a page that does this for you: pick a date and time, and every camera's recording from that moment is cued five seconds before it.
+
+![The Recordings page: find what was recorded at a moment](docs/recordings.jpg)
 
 Files are AAC in fragmented MP4, and they play in any browser, QuickTime, VLC or Windows Media Player. They're written a second at a time, so a power cut loses at most the last second. Recordings older than `-keep` (default `7d`; `0` keeps everything) are deleted. Sound takes about 21 MB per camera per hour. Cameras that are offline at start-up are retried until they come back; a camera without a microphone is skipped.
 
@@ -154,6 +175,22 @@ The layout is a dynamic program written with [dyna](https://github.com/vinodhala
 
 `camwall laws` checks that the algebra obeys the semiring laws that make this correct, and compares the dynamic program with brute force.
 
+## Privacy and security
+
+- `camwall serve` listens only on this computer unless you give `-addr :7788`. On a shop network, add `-password`; it protects the wall, the live sound and the recordings alike.
+- Camera addresses and their passwords stay on the computer running camwall. Browsers get only the names you give the feeds, and the pictures.
+- camwall serves plain HTTP. To watch from outside the shop, use a private network such as [Tailscale](https://tailscale.com) or a tunnel with HTTPS, rather than opening a port on the router.
+- Cameras and microphones in a shop are regulated in many places (signs, consent, how long recordings may be kept). Check the rules that apply to you.
+
+## When something looks wrong
+
+- **A tile has the wrong shape, and the start-up log says "assuming 16:9":** the camera was offline or slow to answer when camwall started. Restart camwall once it's back, or add `aspect=4:3` (or the right shape) to its line.
+- **A camera shows "Reconnecting…":** camwall keeps retrying on its own. Check that the address plays in VLC, and try `transport=udp` for older cameras.
+- **The wall is slow or the computer is busy:** use each camera's sub-stream (`camwall discover -sub`), or lower `-fps` and `-max`.
+- **Other devices can't open the wall:** start with `-addr :7788`, and allow camwall through the computer's firewall.
+- **A web video doesn't play:** update yt-dlp (`brew upgrade yt-dlp` or `pip install -U yt-dlp`); sites change often.
+- **`-labels` fails:** your FFmpeg lacks `drawtext`. Homebrew's FFmpeg has it.
+
 ## Limits
 
 - Up to 25 feeds per wall. For more, run a second wall.
@@ -165,4 +202,4 @@ The layout is a dynamic program written with [dyna](https://github.com/vinodhala
 
 ## License
 
-MIT
+MIT. The pictures in this README come from freely licensed videos; see [docs/CREDITS.md](docs/CREDITS.md).
