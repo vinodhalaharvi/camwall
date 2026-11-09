@@ -1,3 +1,13 @@
+**0.1.2** comes from running every supported source through one wall (RTSP, RTMP, SRT, UDP, HLS, MJPEG over HTTP, snapshot URLs, a dozen video formats, animations, pictures and the screen):
+
+- MJPEG cameras over HTTP showed about one frame a second; they now show every frame asked for.
+- RTMP streams sometimes failed to start; they now get time to announce their video.
+- A recorded HLS playlist played far too fast and then stopped; it now plays at its own speed and loops.
+- MPEG-TS files stopped after one play; they now loop.
+- A camera's snapshot.jpg address showed one picture for ever; the browser wall now fetches it every 2 seconds.
+- UDP streams sent to this computer failed when recording was on, since only one program can receive them; they are now shown and left out of recording, with a note.
+- Video files' sound is no longer recorded (the files already keep it).
+
 **0.1.1** fixes what two independent reviews found:
 
 - Safer by default: camera passwords and tokens are hidden in messages; without `-password` the wall answers only to IP addresses and local names; `discover` no longer trusts what a camera says about other hosts; the user name for `-password` is `camwall`, as documented.

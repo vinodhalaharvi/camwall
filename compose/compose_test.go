@@ -64,7 +64,7 @@ func TestArgs(t *testing.T) {
 	for _, want := range []string{
 		"-copyts",
 		"-use_wallclock_as_timestamps 1 -thread_queue_size 64 -analyzeduration",
-		"setpts=PTS-1700000000.500000/TB,fps=15",
+		"setpts='if(gt(PTS*TB,1e9),PTS-1700000000.500000/TB,(RTCTIME/1000000-1700000000.500000)/TB)',fps=15",
 		"setpts=PTS-STARTPTS+(RTCSTART/1000000-1700000000.500000)/TB",
 		"color=c=black:s=1280x720:r=15",
 		"-f mpegts pipe:1",
@@ -97,7 +97,7 @@ func TestAudioEncoderFilter(t *testing.T) {
 	o := Options{Width: 1280, Height: 720, FPS: 10, Background: "black", Output: "x.mkv", CRF: 23, Audio: 2,
 		Encoder: "h264_videotoolbox", Bitrate: "8M", Start: 1}
 	a := strings.Join(Args(sv.Fit(16.0/9), fs, o), " ")
-	for _, want := range []string{"[1:a]asetpts=PTS-1.000000/TB,aresample", "-map [aout] -c:a aac", "-c:v h264_videotoolbox -b:v 8M",
+	for _, want := range []string{"[1:a]asetpts='if(gt(PTS*TB,1e9),PTS-1.000000/TB,(RTCTIME/1000000-1.000000)/TB)',aresample", "-map [aout] -c:a aac", "-c:v h264_videotoolbox -b:v 8M",
 		"fps=10,hflip,scale="} {
 		if !strings.Contains(a, want) {
 			t.Errorf("args lack %q:\n%s", want, a)

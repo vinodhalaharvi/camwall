@@ -127,6 +127,9 @@ func (h *Hub) Stop() {
 	}
 }
 
+// SnapshotEvery is how often a picture on a server is fetched again.
+var SnapshotEvery = 2 * time.Second
+
 func (h *Hub) args(f feeds.Feed) []string {
 	scale := "scale='if(gte(iw,ih),min(" + strconv.Itoa(h.MaxSide) + ",iw),-2)':'if(gte(iw,ih),-2,min(" + strconv.Itoa(h.MaxSide) + ",ih))'"
 	vf := "fps=" + strconv.Itoa(h.FPS) + "," + scale
@@ -134,6 +137,16 @@ func (h *Hub) args(f feeds.Feed) []string {
 		vf = f.Filter + "," + vf
 	}
 	a := []string{"-hide_banner", "-loglevel", "error", "-nostdin"}
+	if f.Snapshot() { // one fresh picture per run; run fetches it again
+		a = append(a, f.SnapshotArgs()...)
+		return append(a, "-an", "-vf", scale, "-frames:v", "1", "-c:v", "mjpeg", "-q:v", strconv.Itoa(h.Quality), "-f", "image2pipe", "pipe:1")
+	}
+	if f.Kind == feeds.Live {
+		// pick frames by when they arrive: some live feeds (MJPEG over HTTP)
+		// carry no times of their own, and after a stall only the newest
+		// frame of the burst is shown
+		vf = "setpts=(RTCTIME-RTCSTART)/(TB*1000000)," + vf
+	}
 	a = append(a, f.InputArgs(h.FPS)...)
 	return append(a, "-an", "-vf", vf, "-c:v", "mjpeg", "-q:v", strconv.Itoa(h.Quality), "-f", "image2pipe", "pipe:1")
 }
@@ -149,17 +162,40 @@ func (h *Hub) run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
+		h.mu.Lock()
+		seq := h.seq
+		h.mu.Unlock()
 		err := h.once(ctx)
 		if ctx.Err() != nil {
 			return
 		}
+		if h.Feed.Snapshot() {
+			h.mu.Lock()
+			fresh := h.seq != seq
+			h.mu.Unlock()
+			if fresh { // fetched: fetch again shortly, like a camera's own viewer
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(SnapshotEvery):
+				}
+				backoff = time.Second
+				continue
+			}
+		}
 		h.mu.Lock()
 		h.status = "retrying"
+		played := h.seq-seq > 1 // it showed pictures before it stopped
 		h.mu.Unlock()
-		if time.Since(start) > 30*time.Second {
+		if played || time.Since(start) > 30*time.Second {
+			// a feed that played and then ended (a recorded HLS playlist, a
+			// camera that restarted) comes back quickly; only feeds that keep
+			// failing back off
 			backoff = time.Second
 		}
-		log.Printf("feed %d (%s): %v; retrying in %v", h.ID+1, h.Feed.Name, err, backoff)
+		if !(played && err.Error() == "feed ended" && h.Feed.Kind != feeds.Live) { // a file played to its end: not news
+			log.Printf("feed %d (%s): %v; retrying in %v", h.ID+1, h.Feed.Name, err, backoff)
+		}
 		select {
 		case <-ctx.Done():
 			return

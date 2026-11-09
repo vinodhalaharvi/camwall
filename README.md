@@ -49,6 +49,7 @@ Add `-sub` to use each camera's lighter sub-stream, which is plenty for a wall. 
 |---|---|
 | IP camera (RTSP, RTMP, SRT, UDP, HTTP/MJPEG) | `rtsp://user:pass@192.168.1.20/stream1` |
 | HLS or another network stream | `https://example.com/live/index.m3u8` |
+| A camera's snapshot picture | `http://192.168.1.30/snapshot.jpg` (fetched again every 2 seconds on the browser wall) |
 | YouTube, Twitch, Vimeo and other web video, live or recorded | the page URL, e.g. `https://www.youtube.com/watch?v=…`, or `ytdl:URL` for any site (needs [yt-dlp](https://github.com/yt-dlp/yt-dlp)) |
 | This computer's camera or screen | `webcam`, `webcam:1`, `screen` |
 | Any FFmpeg capture device | `v4l2:/dev/video2`, `avfoundation:1`, `"dshow:video=Logitech C920"`, `decklink:DeckLink Mini Recorder` |
@@ -56,7 +57,9 @@ Add `-sub` to use each camera's lighter sub-stream, which is plenty for a wall. 
 | Animations | `promo.gif`, animated `.png` and `.webp` |
 | Pictures | `.jpg`, `.png`, `.webp`, `.avif`, `.tiff`, `.bmp`, `.heic` |
 
-Web pages are resolved again each time they connect, since their video addresses expire. Pictures browsers can't show, such as TIFF, BMP and HEIC, are converted to JPEG once at start-up; on a Mac, HEIC goes through `sips` if FFmpeg can't read it. RTSP tries TCP first and falls back to UDP for cameras that only offer UDP.
+Web pages are resolved again each time they connect, since their video addresses expire. Pictures browsers can't show, such as TIFF, BMP and HEIC, are converted to JPEG once at start-up; on a Mac, HEIC goes through `sips` if FFmpeg can't read it. RTSP tries TCP first and falls back to UDP for cameras that only offer UDP. A recorded HLS playlist (one with an end) plays at its own speed and loops like a file.
+
+Every source in this table except web video, webcams and capture cards was checked in one wall before release: RTSP over TCP, UDP and with a login; RTMP; SRT; UDP MPEG-TS; live and recorded HLS; MJPEG over HTTP; a snapshot URL; files over HTTP; H.264, HEVC, AV1, VP9, MPEG-4, MJPEG, ProRes, Theora and FLV video in MP4, MKV, WebM, AVI, MOV, TS and OGV; GIFs, animated WebP and pictures; and the screen. Sound was checked in AAC, Opus and MP3.
 
 **Cloud-only cameras** like Ring, Nest, Arlo, Blink and Wyze have no stream address of their own. A bridge such as [go2rtc](https://github.com/AlexxIT/go2rtc), [Scrypted](https://www.scrypted.app) or [docker-wyze-bridge](https://github.com/mrlt8/docker-wyze-bridge) re-publishes them as RTSP, and camwall reads that. The same goes for WebRTC-only sources.
 
@@ -124,7 +127,7 @@ camwall serve -f cams.txt -record recordings              # wall and recording t
 camwall record -f cams.txt -o recordings -keep 30d        # recording only, e.g. on a spare computer
 ```
 
-Every feed with a microphone is recorded continuously, whether or not anyone is watching. Files are cut every 15 minutes on the clock (`-segment`) and named by when they start, in a folder per camera:
+Every live feed with a microphone is recorded continuously (files keep their own sound), whether or not anyone is watching. Files are cut every 15 minutes on the clock (`-segment`) and named by when they start, in a folder per camera:
 
 ```
 recordings/01 Front door/2026-11-08_14-15-00.m4a
@@ -210,6 +213,8 @@ The layout is a dynamic program written with [dyna](https://github.com/vinodhala
 - Each feed costs one FFmpeg decode. A wall of 16 HD cameras needs a reasonably recent computer, so lower `-fps` or `-max` in the browser, or `-size` for streams, on small machines. A camera's sub-stream (often `…/102` or `subtype=1`) is lighter and plenty for a wall.
 - The browser wall plays one camera's sound at a time, and the combined stream carries one feed's sound. Recording keeps every feed's sound.
 - A capture device such as a webcam can usually be opened by only one program at a time, so it can't be in a browser wall and a combined stream at once.
+- A UDP stream sent to this computer's own address can be received by only one program, so `serve -record` shows it but doesn't record or play its sound. Send it to a multicast address (`udp://239.0.0.1:5000`) to do both.
+- In the combined stream, a camera's snapshot picture is fetched once at the start; the browser wall fetches it again every 2 seconds.
 - Animated WebP needs FFmpeg 8 for the combined stream. Older FFmpeg leaves it blank there; browsers still play it.
 - DRM-protected video can't be shown.
 

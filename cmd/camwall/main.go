@@ -335,7 +335,7 @@ func serve(args []string) error {
 	recDone := make(chan struct{})
 	close(recDone)
 	if *recDir != "" {
-		rec, err := newRecorder(*recDir, *keep, *segment, tools, feedsList)
+		rec, err := newRecorder(*recDir, *keep, *segment, tools, feedsList, feeds.Feed.UDPUnicast)
 		if err != nil {
 			return err
 		}
@@ -422,7 +422,7 @@ func parseKeep(s string) (time.Duration, error) {
 }
 
 // newRecorder sets up sound recording into dir and says what it will do.
-func newRecorder(dir, keep string, segment time.Duration, tools feeds.Tools, fs []feeds.Feed) (*record.Recorder, error) {
+func newRecorder(dir, keep string, segment time.Duration, tools feeds.Tools, fs []feeds.Feed, skip func(feeds.Feed) bool) (*record.Recorder, error) {
 	k, err := parseKeep(keep)
 	if err != nil {
 		return nil, err
@@ -434,7 +434,11 @@ func newRecorder(dir, keep string, segment time.Duration, tools feeds.Tools, fs 
 		return nil, err
 	}
 	n := 0
-	for _, f := range fs {
+	for i, f := range fs {
+		if record.Wants(f) && skip != nil && skip(f) {
+			fmt.Fprintf(os.Stderr, "Recording sound: feed %d (%s) is UDP sent to this computer, which only one program can receive; it is shown but not recorded. Send it to a multicast address (239.x.x.x) to do both.\n", i+1, f.Name)
+			continue
+		}
 		if record.Wants(f) {
 			n++
 		}
@@ -454,7 +458,7 @@ func newRecorder(dir, keep string, segment time.Duration, tools feeds.Tools, fs 
 		}
 		fmt.Fprintf(os.Stderr, "Recording the sound of %d feed%s into %s, in %v files, %s.\n", n, plural(n), dir, segment, kept)
 	}
-	return &record.Recorder{Dir: dir, Tools: tools, Feeds: fs, Segment: segment, Keep: k}, nil
+	return &record.Recorder{Dir: dir, Tools: tools, Feeds: fs, Segment: segment, Keep: k, Skip: skip}, nil
 }
 
 // recordCmd records the feeds' sound without serving a wall.
@@ -473,7 +477,7 @@ func recordCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	rec, err := newRecorder(*out, *keep, *segment, tools, feedsList)
+	rec, err := newRecorder(*out, *keep, *segment, tools, feedsList, nil)
 	if err != nil {
 		return err
 	}

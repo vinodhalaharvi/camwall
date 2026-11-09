@@ -115,7 +115,10 @@ func Filter(rects []Rect, fs []feeds.Feed, o Options) string {
 // shift moves a feed's timestamps onto the wall's timeline (see Filter).
 func shift(f feeds.Feed, o Options) string {
 	if f.Kind == feeds.Live {
-		return fmt.Sprintf("PTS-%.6f/TB", o.Start)
+		// wall-clock stamps, except where the source has no times and FFmpeg
+		// numbered the frames from zero instead (MJPEG over HTTP): those are
+		// placed by when they reach the filter
+		return fmt.Sprintf("'if(gt(PTS*TB,1e9),PTS-%.6f/TB,(RTCTIME/1000000-%.6f)/TB)'", o.Start, o.Start)
 	}
 	return fmt.Sprintf("PTS-STARTPTS+(RTCSTART/1000000-%.6f)/TB", o.Start)
 }

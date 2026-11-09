@@ -35,19 +35,19 @@ type Recorder struct {
 	Segment time.Duration // length of each file (default 15 minutes)
 	Keep    time.Duration // delete files older than this; 0 keeps everything
 	Bitrate string        // AAC bitrate (default 48k, mono)
+	// Skip, if set, leaves out feeds that Wants would record.
+	Skip func(feeds.Feed) bool
 
 	mu     sync.Mutex
 	status map[int]string
 }
 
-// Wants reports whether a feed's sound should be recorded: it has sound, or
-// it is a live feed whose sound could not be checked at start-up (an
-// offline camera). Pictures and animations have none.
+// Wants reports whether a feed's sound should be recorded: it is live and
+// has sound, or its sound could not be checked at start-up (an offline
+// camera). Files and recorded videos already keep their own sound, and
+// pictures and animations have none.
 func Wants(f feeds.Feed) bool {
-	if f.Audio {
-		return true
-	}
-	return f.Kind == feeds.Live && f.Note != ""
+	return f.Kind == feeds.Live && (f.Audio || f.Note != "")
 }
 
 var unsafe = regexp.MustCompile(`[^\p{L}\p{N} ._()&'+,-]+`)
@@ -73,7 +73,7 @@ func (r *Recorder) Run(ctx context.Context) {
 	}
 	var wg sync.WaitGroup
 	for i, f := range r.Feeds {
-		if !Wants(f) {
+		if !Wants(f) || (r.Skip != nil && r.Skip(f)) {
 			continue
 		}
 		dir := filepath.Join(r.Dir, FolderName(i, f.Name))

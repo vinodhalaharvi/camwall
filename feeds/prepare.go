@@ -155,6 +155,22 @@ func toJPEG(ctx context.Context, ffmpeg, src, dst string) error {
 // get the file itself when they can show it, or a JPEG copy; FFmpeg gets the
 // file, or a JPEG copy when it cannot decode the original. Animated PNG and
 // WebP become animations.
+// remuxTS copies an MPEG-TS file (up to 1 GB) into a Matroska file in the
+// temporary folder, without re-encoding: FFmpeg can loop that in place,
+// which it cannot do with the .ts file. If it fails, the .ts file is played
+// to its end and opened again instead.
+func remuxTS(ctx context.Context, t Tools, f *Feed, n int) {
+	if st, err := os.Stat(f.Input); err != nil || st.Size() > 1<<30 || t.TempDir == "" {
+		return
+	}
+	mkv := filepath.Join(t.TempDir, fmt.Sprintf("feed%d.mkv", n+1))
+	err := Child(exec.CommandContext(ctx, t.FFmpeg, "-v", "error", "-nostdin", "-y", "-i", f.Input,
+		"-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-dn", "-sn", mkv)).Run()
+	if err == nil {
+		f.Input = mkv
+	}
+}
+
 func preparePicture(ctx context.Context, t Tools, f *Feed, n int) error {
 	ext := strings.ToLower(filepath.Ext(f.Src))
 	if format, anim := animated(f.Src); anim {
@@ -212,6 +228,10 @@ type probeOut struct {
 		} `json:"side_data_list"`
 		Tags map[string]string `json:"tags"`
 	} `json:"streams"`
+	Format struct {
+		Name     string `json:"format_name"`
+		Duration string `json:"duration"`
+	} `json:"format"`
 }
 
 // Probe asks ffprobe for the feed's picture size and whether it has sound.
@@ -219,7 +239,7 @@ type probeOut struct {
 // rotation. The feed must already be Opened.
 func Probe(ctx context.Context, ffprobe string, f *Feed) error {
 	args := []string{"-v", "error",
-		"-show_entries", "stream=codec_type,width,height,sample_aspect_ratio:stream_side_data=rotation:stream_tags=rotate", "-of", "json"}
+		"-show_entries", "stream=codec_type,width,height,sample_aspect_ratio:stream_side_data=rotation:stream_tags=rotate:format=format_name,duration", "-of", "json"}
 	args = append(args, f.netArgs()...)
 	args = append(args, f.deviceArgs()...)
 	args = append(args, "-i", f.Input)
@@ -233,6 +253,11 @@ func Probe(ctx context.Context, ffprobe string, f *Feed) error {
 	var p probeOut
 	if err := json.Unmarshal(out, &p); err != nil {
 		return err
+	}
+	// an HLS playlist that has an end is a recording, not a live stream: it
+	// is played at its own speed and looped like a file
+	if d, err := strconv.ParseFloat(p.Format.Duration, 64); err == nil && d > 0 && f.Kind == Live && strings.Contains(p.Format.Name, "hls") {
+		f.Kind = Video
 	}
 	found := false
 	for _, s := range p.Streams {
@@ -350,6 +375,9 @@ func Prepare(fs []Feed, t Tools, timeout time.Duration) error {
 					return
 				}
 			}
+			if f.IsFile() && f.Kind == Video && f.noLoop() {
+				remuxTS(ctx, t, f, i)
+			}
 			g := *f
 			if f.Web {
 				var err error
@@ -402,5 +430,8 @@ func settle(f, g Feed, ctx context.Context, t Tools) Feed {
 		return f
 	}
 	f.Aspect, f.Width, f.Height, f.Audio = g.Aspect, g.Width, g.Height, g.Audio
+	if g.Kind == Video && f.Kind == Live {
+		f.Kind = Video
+	}
 	return f
 }

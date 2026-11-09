@@ -171,7 +171,7 @@ func (s *Server) apiFeeds(w http.ResponseWriter, r *http.Request) {
 		Recordings bool       `json:"recordings"`
 	}{Title: s.Title, Recordings: s.RecDir != ""}
 	for i, f := range s.Feeds {
-		out.Feeds = append(out.Feeds, feedInfo{i, f.Name, string(f.Kind), f.Aspect, f.Weight, Static(f), f.Audio && !Static(f), f.Note})
+		out.Feeds = append(out.Feeds, feedInfo{i, f.Name, string(f.Kind), f.Aspect, f.Weight, Static(f), f.Audio && !Static(f) && !f.UDPUnicast(), f.Note})
 	}
 	writeJSON(w, out)
 }
@@ -397,7 +397,7 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := s.Feeds[id]
-	if !f.Audio || Static(f) {
+	if !f.Audio || Static(f) || f.UDPUnicast() { // only one program can receive unicast UDP
 		http.Error(w, "this feed has no sound", http.StatusNotFound)
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -416,6 +417,42 @@ func (f Feed) InputArgs(fps int) []string {
 	return f.inputArgs(fps, false)
 }
 
+// noLoop: FFmpeg cannot loop an MPEG-TS file in place (it stalls at the
+// end), so Prepare copies one into Matroska; if that was not possible, it
+// plays to the end and is opened again.
+func (f Feed) noLoop() bool {
+	switch strings.ToLower(filepath.Ext(strings.SplitN(f.Input, "?", 2)[0])) {
+	case ".ts", ".m2ts", ".mts":
+		return true
+	}
+	return false
+}
+
+// UDPUnicast reports whether the feed is UDP sent to this computer's own
+// address. Only one program can receive such a stream, so camwall cannot
+// show it and record its sound at the same time.
+func (f Feed) UDPUnicast() bool {
+	u, err := url.Parse(f.Input)
+	if err != nil || u.Scheme != "udp" {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip == nil || !ip.IsMulticast()
+}
+
+// Snapshot reports whether the feed is a picture on a server, such as a
+// camera's snapshot.jpg address, which shows something new each time it is
+// fetched.
+func (f Feed) Snapshot() bool {
+	return f.Kind == Image && !f.IsFile() && f.Format == ""
+}
+
+// SnapshotArgs read a Snapshot feed's picture once.
+func (f Feed) SnapshotArgs() []string {
+	a := append([]string{}, f.netArgs()...)
+	return append(a, "-i", f.Input)
+}
+
 // WallclockInputArgs are InputArgs for a combined wall. A live feed's
 // packets are stamped with the time they are read, so all live inputs share
 // one clock: a camera that buffered video while FFmpeg opened the others is
@@ -442,14 +479,19 @@ func (f Feed) inputArgs(fps int, wallclock bool) []string {
 		a = append(a, f.netArgs()...)
 	case Video:
 		a = append(a, "-re")
-		if f.Format != "lavfi" {
+		if f.Format != "lavfi" && !f.noLoop() {
 			a = append(a, "-stream_loop", "-1")
 		}
 		a = append(a, f.netArgs()...) // a recorded web video or a file on a server
 	case Live:
 		// FFmpeg opens inputs one at a time; probing each for half a second
 		// instead of five keeps start-up short on a wall of cameras.
-		a = append(a, "-analyzeduration", "500000", "-probesize", "1000000")
+		// RTMP announces its video late, so it gets two seconds.
+		if sc := Scheme(f.Input); sc == "rtmp" || sc == "rtmps" {
+			a = append(a, "-analyzeduration", "2000000", "-probesize", "2000000")
+		} else {
+			a = append(a, "-analyzeduration", "500000", "-probesize", "1000000")
+		}
 		a = append(a, f.netArgs()...)
 		a = append(a, "-fflags", "+discardcorrupt")
 	}
@@ -469,8 +511,11 @@ func (f Feed) netArgs() []string {
 		return append(a, "-rtsp_flags", "prefer_tcp") // TCP if the camera offers it, else UDP
 	case "http", "https":
 		return []string{"-rw_timeout", "10000000", "-reconnect", "1", "-reconnect_streamed", "1"}
-	case "udp", "srt":
-		// give up on a silent source instead of waiting for ever (then retry)
+	case "udp":
+		// give up on a silent source instead of waiting for ever (then
+		// retry); reuse lets the wall and the recorder share a multicast
+		return []string{"-timeout", "10000000", "-reuse", "1"}
+	case "srt":
 		return []string{"-timeout", "10000000"}
 	case "rtmp", "rtmps", "tcp":
 		return []string{"-rw_timeout", "10000000"}
