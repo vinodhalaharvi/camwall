@@ -1,3 +1,11 @@
+**0.1.4**
+
+- The wall fills the screen. It may stretch by up to 15% to the screen's shape, each feed trimmed at its edges to match (never squashed); "Show whole pictures" in the settings turns this off. Empty screen now counts against a layout, so a wall that fills the screen wins over one that is only marginally better for the smallest feed.
+- In full screen the wall always uses the whole screen, even if a screen shape was chosen to preview another display.
+- Walls of many different shapes no longer show feeds letterboxed inside their tiles: grouping shapes only narrows the search, and every tile is built with its feed's real shape.
+- Hiding, showing or resizing feeds quickly no longer piles up layout requests: the page cancels the old one, and photo walls solve in at most a quarter of a second.
+- `stream` and `plan` fill their frame the same way (`-trim 0` for whole pictures).
+
 **0.1.3**
 
 - `camwall demo`: try camwall with no cameras. Six pet clips (3.5 MB, downloaded once) play as cameras next to a still picture; offline, FFmpeg's moving test pictures stand in.

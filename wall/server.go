@@ -259,7 +259,14 @@ func (s *Server) apiLayout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	wall := sv.Fit(aspect)
+	// trim: how far the wall may stretch to fill the screen (feeds trimmed
+	// at their edges to match); the page sends 0.15 unless whole pictures
+	// were asked for
+	trim, err := strconv.ParseFloat(r.URL.Query().Get("trim"), 64)
+	if err != nil {
+		trim = 0
+	}
+	wall := sv.FitTrim(aspect, trim)
 	for i := range wall.Tiles {
 		wall.Tiles[i].Feed = ids[wall.Tiles[i].Feed]
 	}
@@ -269,7 +276,8 @@ func (s *Server) apiLayout(w http.ResponseWriter, r *http.Request) {
 		Fill     float64       `json:"fill"`
 		Shapes   float64       `json:"shapes"`
 		Evened   bool          `json:"evened,omitempty"` // sizes too varied; laid out equal
-	}{wall.Tiles, wall.Smallest, wall.Fill, sv.Count(), sv.Evened})
+		Trim     float64       `json:"trim"`
+	}{wall.Tiles, wall.Smallest, wall.Fill, sv.Count(), sv.Evened, wall.Trim})
 }
 
 func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {

@@ -68,7 +68,8 @@ func exhaustive(feeds []Feed, screen float64) float64 {
 	}
 	best := 0.0
 	for _, r := range all(uint32(1)<<len(feeds) - 1) {
-		best = math.Max(best, r.s*math.Min(r.a/screen, screen/r.a))
+		fill := math.Min(r.a/screen, screen/r.a)
+		best = math.Max(best, Rank(r.s*fill, fill, 0))
 	}
 	return best
 }
@@ -87,7 +88,8 @@ func TestNearOptimal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, want := s.Fit(screen).Smallest, exhaustive(feeds, screen)
+		w := s.Fit(screen)
+		got, want := Rank(w.Smallest, w.Fill, 0), exhaustive(feeds, screen)
 		if got < 0.97*want || got > want+1e-9 {
 			t.Errorf("trial %d: %d feeds on %.2f: got %.4f, exact best %.4f", trial, n, screen, got, want)
 		}
@@ -284,5 +286,42 @@ func TestManyDifferentShapes(t *testing.T) {
 			}
 		}
 		t.Logf("%d feeds: %v, evened %v, smallest %.3f", n, time.Since(start).Round(time.Millisecond), sv.Evened, w.Smallest)
+	}
+}
+
+// Grouping shapes only narrows the search: the tiles are always exactly
+// their feeds' shapes. FitTrim fills more of the screen and never stretches
+// a feed by more than it was allowed.
+func TestTilesKeepShapesAndTrimIsBounded(t *testing.T) {
+	r := rand.New(rand.NewSource(11))
+	for k := 0; k < 25; k++ {
+		n := 2 + r.Intn(15)
+		var feeds []Feed
+		for len(feeds) < n {
+			feeds = append(feeds, Feed{Aspect: 0.5 + 1.6*r.Float64(), Weight: []float64{1, 1, 2, 6}[r.Intn(4)]})
+		}
+		sv, err := Solve(feeds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, screen := range []float64{16.0 / 9, 1, 0.6, 2.4} {
+			for _, tile := range sv.Fit(screen).Tiles {
+				got := tile.W * screen / tile.H
+				if want := feeds[tile.Feed].Aspect; math.Abs(got/want-1) > 1e-6 {
+					t.Fatalf("tile %.4f for a %.4f feed", got, want)
+				}
+			}
+			whole, filled := sv.Fit(screen), sv.FitTrim(screen, 0.15)
+			if Rank(filled.Smallest, filled.Fill, filled.Trim) < Rank(whole.Smallest, whole.Fill, 0)-1e-12 {
+				t.Errorf("allowing a trim made the wall worse")
+			}
+			for _, tile := range filled.Tiles {
+				got := tile.W * screen / tile.H
+				want := feeds[tile.Feed].Aspect
+				if c := 1 - math.Min(got/want, want/got); c > 0.15+1e-9 {
+					t.Fatalf("trimmed %.3f, more than allowed", c)
+				}
+			}
+		}
 	}
 }

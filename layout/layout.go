@@ -366,29 +366,66 @@ func Work(kindOf []int) int {
 	return pairs
 }
 
+// Edges counts the splits the search will weigh: one per (sub-wall, way to
+// cut it), the true cost of a solve. Counting walks every sub-wall without
+// solving anything; walls with more than maxStates sub-walls count as
+// too big.
+func Edges(kindOf []int, exhaustive int) int {
+	const maxStates = 100000
+	var counts State
+	kinds := 0
+	for _, k := range kindOf {
+		counts[k]++
+		if k+1 > kinds {
+			kinds = k + 1
+		}
+	}
+	states := 1
+	for k := 0; k < kinds; k++ {
+		states *= int(counts[k]) + 1
+		if states > maxStates {
+			return math.MaxInt32
+		}
+	}
+	split := SplitsUpTo(kinds, exhaustive)
+	edges := 0
+	var s State
+	for {
+		k := 0
+		for k < kinds {
+			if s[k] < counts[k] {
+				s[k]++
+				break
+			}
+			s[k] = 0
+			k++
+		}
+		if k == kinds {
+			return edges
+		}
+		edges += len(split(s))
+	}
+}
+
 // Solve searches every gap-free guillotine wall of the feeds. Feeds of many
 // different shapes and sizes make the search grow fast, so when they would
 // take too long Solve simplifies, in order, until the search is quick:
 //
-//  1. shapes within a few percent are treated as one (letterboxed slightly),
+//  1. close shapes are searched as one,
 //  2. the sizes asked for are evened out (Evened is set),
-//  3. shapes are merged ever more coarsely (up to about 40% apart).
+//  3. shapes are grouped ever more coarsely.
 //
-// A feed whose tile is not quite its shape is shown whole inside it, with a
-// thin border.
+// Grouping only narrows the search: the walls it finds are built with every
+// feed's real shape, so tiles always fit their feeds exactly, with no gaps.
 func Solve(feeds []Feed) (*Solved, error) {
 	sv, err := SolveUpTo(feeds, ExhaustiveUpTo)
 	if err != ErrTooManySizes {
 		return sv, err
 	}
 	try := func(fs []Feed, evened bool) (*Solved, error) {
-		sv, err := SolveUpTo(fs, ExhaustiveUpTo)
+		sv, err := solve(fs, feeds, ExhaustiveUpTo)
 		if sv != nil {
 			sv.Evened = evened
-			sv.Feeds = append([]Feed(nil), sv.Feeds...)
-			for i := range sv.Feeds { // report the real shapes, not the merged ones
-				sv.Feeds[i].Aspect = feeds[i].Aspect
-			}
 		}
 		return sv, err
 	}
@@ -437,6 +474,14 @@ func MergeShapes(feeds []Feed, tol float64) []Feed {
 
 // SolveUpTo is Solve with a different exhaustive limit (for tests).
 func SolveUpTo(feeds []Feed, exhaustive int) (*Solved, error) {
+	return solve(feeds, feeds, exhaustive)
+}
+
+// solve searches with the shapes in search (which may be grouped, so the
+// search is smaller) and builds the walls it finds with the real shapes, so
+// every tile is exactly its feed's shape and the wall has no gaps.
+func solve(search, real []Feed, exhaustive int) (*Solved, error) {
+	feeds := search
 	kinds, kindOf, err := Group(feeds)
 	if err != nil {
 		return nil, err
@@ -454,9 +499,9 @@ func SolveUpTo(feeds []Feed, exhaustive int) (*Solved, error) {
 		return nil, errors.New("no wall fits: the feeds' shapes are too extreme")
 	}
 	norm := make([]Feed, len(feeds))
-	for i, f := range feeds {
+	for i := range feeds {
 		norm[i] = kinds[kindOf[i]]
-		norm[i].Aspect = f.Aspect
+		norm[i].Aspect = real[i].Aspect
 	}
 	sv := &Solved{Feeds: norm, kinds: kinds, kindOf: kindOf, Stats: st}
 	for _, b := range root.NZ {
@@ -501,6 +546,7 @@ type Wall struct {
 	// weight): what the search maximises.
 	Smallest float64 `json:"smallest"`
 	Fill     float64 `json:"fill"` // share of the screen the wall covers
+	Trim     float64 `json:"trim"` // share of a feed's picture trimmed to stretch the wall (FitTrim)
 	Tree     *Node   `json:"tree"`
 }
 
@@ -528,17 +574,38 @@ func (s *Solved) exact(e *dyna.Entry[Step], next []int) (*Node, float64) {
 // Fit returns the wall that shows the smallest feed largest on a screen of
 // the given aspect ratio (width / height). The wall keeps every feed's shape
 // exactly and is centred with bars where it does not fill the screen.
-func (s *Solved) Fit(screen float64) Wall {
+func (s *Solved) Fit(screen float64) Wall { return s.FitTrim(screen, 0) }
+
+// Rank scores a wall on a screen: mostly how big its smallest feed is
+// (smallest: its share of the screen), but empty screen counts against it
+// too, a little more than a trimmed sliver of picture does, so of two walls
+// with nearly the same smallest feed the one that fills the screen wins.
+func Rank(smallest, fill, trim float64) float64 {
+	return smallest * math.Sqrt(fill) * (1 - trim/4)
+}
+
+// FitTrim is Fit, except that the wall may be stretched to the screen's
+// shape by up to trim (0.15: 15%), each feed trimmed at its edges to its
+// stretched tile, where that leaves less of the screen empty. Wall.Trim says
+// how much was used.
+func (s *Solved) FitTrim(screen, trim float64) Wall {
 	if !(screen > 0) || math.IsInf(screen, 0) {
 		screen = 16.0 / 9 // a nonsense screen shape gets an ordinary one
+	}
+	trim = math.Min(math.Max(trim, 0), 0.5)
+	if math.IsNaN(trim) {
+		trim = 0
 	}
 	var best Wall
 	bestRank := -1.0
 	for _, c := range s.cands {
-		fill := math.Min(c.tree.A/screen, screen/c.tree.A)
-		if rank := c.share * fill; rank > bestRank+1e-12 {
+		a := c.tree.A
+		shown := math.Min(math.Max(screen, a*(1-trim)), a/(1-trim)) // stretched shape
+		cut := 1 - math.Min(shown/a, a/shown)
+		fill := math.Min(shown/screen, screen/shown)
+		if rank := Rank(c.share*fill, fill, cut); rank > bestRank+1e-12 {
 			bestRank = rank
-			best = Wall{Aspect: c.tree.A, Smallest: rank, Fill: fill, Tree: c.tree}
+			best = Wall{Aspect: shown, Smallest: c.share * fill, Fill: fill, Trim: cut, Tree: c.tree}
 		}
 	}
 	// place the wall, centred

@@ -595,6 +595,7 @@ func parseSize(s string) (int, int, error) {
 
 func stream(args []string) error {
 	fs := newFlags("stream")
+	trim := fs.Float64("trim", 0.15, "")
 	var c common
 	c.register(fs)
 	out := fs.String("o", "wall.mkv", "")
@@ -639,8 +640,9 @@ func stream(args []string) error {
 		return err
 	}
 	o := compose.Options{Width: w, Height: h, FPS: *fps, Gutter: *gutter, Background: *bg,
-		Labels: *labels, Font: *font, Output: *out, CRF: *crf, Encoder: *encoder, Bitrate: *bitrate, Audio: *audio}
-	wl := sv.Fit(float64(w) / float64(h))
+		Labels: *labels, Font: *font, Output: *out, CRF: *crf, Encoder: *encoder, Bitrate: *bitrate, Audio: *audio,
+		Fill: *trim > 0}
+	wl := sv.FitTrim(float64(w)/float64(h), *trim)
 	// web pages are resolved again on every start: their media URLs expire
 	argsNow := func() ([]string, error) {
 		opened := make([]feeds.Feed, len(feedsList))
@@ -728,6 +730,7 @@ func isFile(out string) bool { return out != "-" && feeds.Scheme(out) == "" }
 
 func plan(args []string) error {
 	fs := newFlags("plan")
+	trimArg := fs.Float64("trim", 0.15, "")
 	var c common
 	c.register(fs)
 	ratio := fs.String("ratio", "16:9", "")
@@ -747,13 +750,16 @@ func plan(args []string) error {
 	if err != nil {
 		return err
 	}
-	wl := sv.Fit(screen)
+	wl := sv.FitTrim(screen, *trimArg)
 	fmt.Print(sketch(wl, screen, 72))
 	smallest := 1.0
 	for _, t := range wl.Tiles {
 		smallest = math.Min(smallest, t.W*t.H)
 	}
 	fmt.Printf("\nWall fills %.0f%% of a %s screen; the smallest feed gets %.1f%% of it.\n", 100*wl.Fill, *ratio, 100*smallest)
+	if wl.Trim > 0.005 {
+		fmt.Printf("To fill it, feeds are trimmed by up to %.0f%% at their edges (-trim 0 shows them whole).\n", 100*wl.Trim)
+	}
 	if sv.Evened {
 		fmt.Println("The sizes asked for were too varied to search quickly, so every feed is shown the same size.")
 	}

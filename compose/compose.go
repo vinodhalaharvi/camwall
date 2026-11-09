@@ -30,6 +30,9 @@ type Options struct {
 	CRF           int    // quality for libx264/libx265; lower is better
 	Bitrate       string // target bitrate for other encoders, e.g. 6M
 	Audio         int    // feed number (from 1) whose sound goes into the stream; 0 for none
+	// Fill: each feed fills its whole cell, trimmed at its edges to the
+	// cell's shape (for walls stretched to the output with layout.FitTrim).
+	Fill bool
 	// Start is the Unix time in seconds at which FFmpeg is launched. Inputs
 	// are stamped with wall-clock time, and the wall's timeline starts here.
 	Start float64
@@ -52,6 +55,9 @@ func Place(w layout.Wall, fs []feeds.Feed, o Options) []Rect {
 		fw, fh := cw, cw/a
 		if fh > ch {
 			fw, fh = ch*a, ch
+		}
+		if o.Fill {
+			fw, fh = cw, ch
 		}
 		r := Rect{W: max(2, 2*int(fw/2)), H: max(2, 2*int(fh/2))} // floor to even: never spill out of the cell
 		r.X = even(x0 + (cw-float64(r.W))/2)
@@ -85,7 +91,11 @@ func Filter(rects []Rect, fs []feeds.Feed, o Options) string {
 		if fs[i].Filter != "" {
 			b.WriteString(fs[i].Filter + ",")
 		}
-		fmt.Fprintf(&b, "scale=%d:%d:flags=bilinear,setsar=1,format=yuv420p", r.W, r.H)
+		if o.Fill { // cover the cell, trimming the edges that overhang
+			fmt.Fprintf(&b, "scale=%d:%d:force_original_aspect_ratio=increase:flags=bilinear,crop=%d:%d,setsar=1,format=yuv420p", r.W, r.H, r.W, r.H)
+		} else {
+			fmt.Fprintf(&b, "scale=%d:%d:flags=bilinear,setsar=1,format=yuv420p", r.W, r.H)
+		}
 		if o.Labels {
 			size := max(12, min(32, r.H/14))
 			font := ""

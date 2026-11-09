@@ -22,7 +22,7 @@
   .tile[hidden] { display: none; }
   .tile .in:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .tile .in { position: relative; width: 100%; height: 100%; background: var(--tile); overflow: hidden; border-radius: 3px; cursor: zoom-in; }
-  .tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+  .tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
   .tile .name {
     position: absolute; left: 6px; bottom: 6px; max-width: calc(100% - 12px);
     font-size: 12px; line-height: 1; padding: 5px 7px; border-radius: 4px;
@@ -136,8 +136,9 @@
   <div class="lab"><span>Background</span></div>
   <div class="chips" id="bgs"></div>
   <label class="check"><input type="checkbox" id="names" checked> Show names</label>
+  <label class="check"><input type="checkbox" id="whole"> Show whole pictures</label>
 
-  <p class="note">Size asks for that many times the area of a 1× feed; the wall changes only when it can without shrinking the others too much. Settings are saved in this browser.</p>
+  <p class="note">The wall fills the screen by trimming up to 15% off feeds' edges; with whole pictures nothing is trimmed and the wall may leave bands. Size asks for that many times the area of a 1× feed; the wall changes only when it can without shrinking the others too much. Settings are saved in this browser.</p>
 </aside>
 
 <div id="bar">
@@ -164,7 +165,10 @@ let noNames = new URLSearchParams(location.search).has('nonames'); // for this v
 
 let feeds = [], tiles = [], focused = -1, title = 'camwall';
 // per-viewer settings; feeds are remembered by name so a restart keeps them
-let S = { shape: 0, gap: 4, bg: BGS[0][1], names: true, panel: false, hidden: {}, size: {} };
+let S = { shape: 0, gap: 4, bg: BGS[0][1], names: true, whole: false, panel: false, hidden: {}, size: {} };
+// A screen shape previews another screen from this one; full screen means
+// this is the screen, so the wall fills it whatever shape was chosen.
+const shapeNow = () => document.fullscreenElement ? 0 : S.shape;
 const key = () => 'camwall:' + title;
 function load() { try { Object.assign(S, JSON.parse(localStorage.getItem(key()) || '{}')); } catch (e) {} }
 function save() { try { localStorage.setItem(key(), JSON.stringify(S)); } catch (e) {} }
@@ -252,6 +256,7 @@ function buildPanel() {
     b.onclick = () => { S.bg = c; changed(); };
   }
   $('names').onchange = () => { S.names = $('names').checked; noNames = false; changed(); };
+  $('whole').onchange = () => { S.whole = $('whole').checked; changed(); };
 }
 
 function setSize(f, w) {
@@ -266,11 +271,12 @@ function apply() {
   root.setProperty('--wallbg', S.bg);
   document.body.classList.toggle('nonames', !S.names || noNames);
   document.body.classList.toggle('settings', !!S.panel);
-  document.body.classList.toggle('fixedshape', !!S.shape);
+  document.body.classList.toggle('fixedshape', !!shapeNow());
   root.setProperty('--panel', S.panel && innerWidth > 700 ? '300px' : '0px');
   $('settings').setAttribute('aria-pressed', S.panel ? 'true' : 'false');
   $('gap').value = S.gap; $('gap-out').textContent = S.gap + ' px';
   $('names').checked = S.names && !noNames;
+  $('whole').checked = !!S.whole;
   for (const b of $('bgs').children) b.setAttribute('aria-pressed', b.dataset.c === S.bg ? 'true' : 'false');
   for (const b of $('shapes').children) b.setAttribute('aria-pressed', Math.abs(+b.dataset.a - S.shape) < 1e-3 ? 'true' : 'false');
   $('shape').value = S.shape ? Math.log(S.shape) : Math.log(stageAspect());
@@ -311,11 +317,12 @@ async function relayout() {
   if (!W || !H) return;
   // a fixed screen shape is drawn as a frame of that shape, centred in the window
   let sw = W, sh = H;
-  if (S.shape) { if (W / H > S.shape) sw = H * S.shape; else sh = W / S.shape; }
+  const shp = shapeNow();
+  if (shp) { if (W / H > shp) sw = H * shp; else sh = W / shp; }
   Object.assign(stage.style, { left: (W - sw) / 2 + 'px', top: (H - sh) / 2 + 'px', width: sw + 'px', height: sh + 'px' });
   const on = shown();
   if (!on.length) { $('summary').textContent = '0 feeds shown'; return; }
-  const q = `aspect=${(sw / sh).toFixed(4)}&show=${on.map(f => f.id).join(',')}&weights=${feeds.map(sizeOf).join(',')}`;
+  const q = `aspect=${(sw / sh).toFixed(4)}&show=${on.map(f => f.id).join(',')}&weights=${feeds.map(sizeOf).join(',')}&trim=${S.whole ? 0 : 0.15}`;
   let L;
   // only the newest layout matters: cancel the one before, so the server
   // never works through a queue of layouts nobody will see
@@ -344,7 +351,7 @@ async function relayout() {
   const big = on.filter(f => sizeOf(f) > f.weight).length;
   $('summary').textContent = `${on.length} feed${on.length === 1 ? '' : 's'}` + (off ? ` (${off} off)` : '') +
     (big ? ` · ${big} enlarged` : '') + (L.evened ? ' · too many different sizes, shown equal' : '') + ` · best of ${fmt(L.shapes)} layouts`;
-  if (!S.shape) $('shape').value = Math.log(sw / sh);
+  if (!shp) $('shape').value = Math.log(sw / sh);
 }
 
 function fmt(n) {
@@ -509,6 +516,7 @@ function togglePanel() { S.panel = !S.panel; save(); apply(); relayout(); }
 function toggleKiosk(on) { document.body.classList.toggle('kiosk', on); apply(); relayout(); }
 
 addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { apply(); relayout(); }, 120); });
+document.addEventListener('fullscreenchange', () => { apply(); relayout(); });
 $('settings').onclick = togglePanel;
 $('kiosk').onclick = () => toggleKiosk(true);
 $('unkiosk').onclick = () => toggleKiosk(false);

@@ -2,7 +2,7 @@
 
 Every camera feed on one gap-free wall: in your browser, or as one combined video stream.
 
-camwall is for a shop manager who wants all their cameras in one place. Give it IP cameras, network streams, web videos, the computer's own camera, video files, animations or a still image or two. It finds the arrangement that shows the smallest feed as large as possible on your screen, and no feed is cropped or stretched.
+camwall is for a shop manager who wants all their cameras in one place. Give it IP cameras, network streams, web videos, the computer's own camera, video files, animations or a still image or two. It finds the arrangement that shows the smallest feed as large as possible and fills your screen, trimming at most a sliver off a feed's edges to do it (or none, if you ask for whole pictures). Nothing is ever stretched.
 
 ![Six pet cameras and a still photo on one wall](docs/wall.jpg)
 
@@ -191,9 +191,9 @@ Wall fills 95% of a 16:9 screen; the smallest feed gets 7.4% of it.
 The layout is a dynamic program written with [dyna](https://github.com/vinodhalaharvi/dyna), the same library behind [collage](https://github.com/vinodhalaharvi/collage). It searches every *guillotine* wall, meaning every way to split the screen in two, then each part in two, and so on.
 
 - **Feeds are grouped into kinds.** Cameras that share a shape and a weight are interchangeable, so the search tracks how many of each kind are left rather than which ones. Sixteen identical cameras give 17 subproblems instead of 65,536, which is why camwall handles 16 feeds where collage stops at 10.
-- **Nothing is cropped.** Each tile keeps its feed's exact shape, and the wall is letterboxed into the screen. The score is the on-screen area of the smallest feed per unit of weight. It's maximised with the (max, min) semiring, graded by aspect ratio, so fitting the wall to a new screen shape is a lookup rather than a new search.
+- **It fills the screen.** Each tile has its feed's exact shape, so the wall rarely matches the screen exactly. camwall stretches the whole wall to the screen by up to 15%, trimming each feed's edges to its tile (never squashing it), so there are no empty bands; "Show whole pictures" in the settings (or `-trim 0` for `stream` and `plan`) turns this off. The score is the on-screen area of the smallest feed per unit of weight, with empty screen counting against a wall, so of two nearly equal walls the one that fills the screen wins. It's maximised with the (max, min) semiring, graded by aspect ratio, so fitting the wall to a new screen shape is a lookup rather than a new search.
 - **Big walls stay fast.** Groups of up to 6 feeds are split every possible way. Larger groups split off a block of one kind (such as a row of identical cameras) or one or two other feeds, and groups of up to 10 are also halved every way. Against a brute-force search on random mixed walls of 7 to 10 feeds, the median result was the best possible, 9 in 10 were within 5%, and the worst was 15% short of it.
-- **Many different shapes are grouped.** Every distinct shape and size is another kind, and the search grows quickly with kinds, so a folder of photos (each its own shape) would take minutes. When a search would take more than about a second, camwall treats close shapes as one (a 1.30 photo in a 1.34 tile gets a hair-thin border; nothing is cropped), and only if that is not enough evens out the sizes asked for, and says so. 16 photos of random shapes lay out in under a second.
+- **Many different shapes are grouped.** Every distinct shape and size is another kind, and the search grows quickly with kinds, so a folder of photos (each its own shape) would take minutes. When a search would take more than a quarter of a second, camwall searches with close shapes treated as one, and only if that is not enough evens out the sizes asked for, and says so. The grouping only narrows the search: the wall it finds is built with every feed's real shape. 16 photos of random shapes lay out in a quarter of a second.
 
 `camwall laws` checks that the algebra obeys the semiring laws that make this correct, and compares the dynamic program with brute force.
 
