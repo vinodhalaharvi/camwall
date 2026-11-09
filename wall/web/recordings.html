@@ -42,6 +42,7 @@
   <label for="when" class="muted">Go to</label>
   <input type="datetime-local" id="when" step="1">
   <button id="go">Find</button>
+  <span class="muted" id="zone"></span>
   <span class="sp"></span>
   <a class="b" href="./">Back to the wall</a>
 </header>
@@ -53,23 +54,36 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 let SEGMENT = 15 * 60 * 1000;  // longest a file can be; the next file's start ends it sooner
-let folders = [];
+let folders = [], zone = '';
 
 const pad = (n) => String(n).padStart(2, '0');
-const hm = (d) => pad(d.getHours()) + ':' + pad(d.getMinutes()) + (d.getSeconds() ? ':' + pad(d.getSeconds()) : '');
-const dayName = (d) => d.toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+// Times are shown and typed on the recording computer's clock, wherever the
+// viewer is: a clock time "2026-11-08T14:00:00" is held as a Date at that UTC
+// time and read back with the getUTC* methods.
+const clock = (s) => new Date(s + 'Z');
+const hm = (d) => pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + (d.getUTCSeconds() ? ':' + pad(d.getUTCSeconds()) : '');
+const dayName = (d) => d.toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
 const mb = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
 const url = (folder, file) => 'rec/' + encodeURIComponent(folder) + '/' + encodeURIComponent(file);
 const label = (folder) => folder.replace(/^\d+ /, '');
 
 function el(tag, cls, parent, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; if (parent) parent.append(e); return e; }
 
-// end of each file: the next file's start if it follows on, else start + segment length
+// Each file runs from its start until the next file starts, the segment
+// length, or the last write to it, whichever comes first (a few seconds of
+// slack for the final write). f.t and f.end are on the recording clock.
 function spans(files) {
-  const asc = files.map(f => ({ ...f, t: new Date(f.start) })).sort((a, b) => a.t - b.t);
+  const asc = files.map(f => {
+    const start = Date.parse(f.start), shift = +clock(f.clock) - start;
+    return { ...f, at: start, shift, t: clock(f.clock) };
+  }).sort((a, b) => a.at - b.at);
   asc.forEach((f, i) => {
     const next = asc[i + 1];
-    f.end = new Date(Math.min(+f.t + SEGMENT, next ? +next.t : Infinity));
+    let end = Math.min(f.at + SEGMENT, next ? next.at : Infinity);
+    const written = Date.parse(f.end);
+    if (written > f.at) end = Math.min(end, written + 2000);
+    f.endAt = end;
+    f.end = new Date(end + f.shift);
   });
   return asc.reverse();
 }
@@ -109,13 +123,15 @@ function render() {
 function find() {
   const v = $('when').value;
   if (!v) return;
-  const t = new Date(v);
+  const t = clock(v.length === 16 ? v + ':00' : v);
   const out = $('found-list');
   out.textContent = '';
   $('found').style.display = 'block';
-  $('found-title').textContent = 'Recorded at ' + dayName(t) + ' ' + t.toLocaleTimeString();
+  $('found-title').textContent = 'Recorded at ' + dayName(t) + ' ' + hm(t) + (zone ? ' ' + zone : '');
   let n = 0;
   for (const fd of folders) {
+    // compare on each file's own clock, so a moment in the hour that repeats
+    // when clocks go back finds the right file
     const f = spans(fd.files || []).find(f => f.t <= t && t < f.end);
     if (!f) continue;
     n++;
@@ -134,8 +150,10 @@ $('when').onkeydown = (e) => { if (e.key === 'Enter') find(); };
     const data = await r.json();
     folders = data.folders || [];
     if (data.segment) SEGMENT = data.segment * 1000;
-    const now = new Date(Date.now() - 10 * 60000);
-    $('when').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+    zone = data.zone || '';
+    if (zone) $('zone').textContent = 'Times on the recording computer\'s clock (' + zone + ')';
+    const now = new Date(+clock(data.now) - 10 * 60000);
+    $('when').value = now.toISOString().slice(0, 17) + '00';
     render();
   } catch (e) { el('p', 'empty', $('list'), 'Could not load recordings: ' + e.message); }
 })();

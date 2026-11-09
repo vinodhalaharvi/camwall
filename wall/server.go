@@ -37,9 +37,18 @@ type Server struct {
 
 	listeners chan struct{} // limits concurrent live-sound streams
 
-	mu    sync.Mutex
-	cache map[string]*layout.Solved
-	order []string
+	mu       sync.Mutex
+	cache    map[string]*layout.Solved
+	order    []string
+	inflight map[string]*solveCall
+	solving  chan struct{}  // one solve at a time
+	procs    sync.WaitGroup // live-sound FFmpeg processes
+}
+
+type solveCall struct {
+	done chan struct{}
+	sv   *layout.Solved
+	err  error
 }
 
 // Static reports whether a feed goes straight to the browser as a file: a
@@ -52,7 +61,7 @@ func Static(f feeds.Feed) bool {
 // New makes a server and a hub for every moving feed.
 func New(title string, t feeds.Tools, fs []feeds.Feed, fps, maxSide, quality int) *Server {
 	s := &Server{Title: title, Feeds: fs, Hubs: make([]*Hub, len(fs)), Tools: t, cache: map[string]*layout.Solved{},
-		listeners: make(chan struct{}, 8)}
+		inflight: map[string]*solveCall{}, solving: make(chan struct{}, 1), listeners: make(chan struct{}, 8)}
 	for i, f := range fs {
 		if !Static(f) {
 			s.Hubs[i] = &Hub{ID: i, Feed: f, Tools: t, FPS: fps, MaxSide: maxSide, Quality: quality, Linger: 15 * time.Second}
@@ -63,29 +72,60 @@ func New(title string, t feeds.Tools, fs []feeds.Feed, fps, maxSide, quality int
 
 // Solve returns the solved wall for the shown feeds (ids) with the given
 // weights (one per feed on the server), solving each combination once.
-// Tiles of the result refer to positions in ids.
+// Solves run one at a time and outside the lock, so a slow one never holds
+// up requests for walls already solved; concurrent requests for the same
+// wall share one solve. Tiles of the result refer to positions in ids.
 func (s *Server) Solve(ids []int, weights []float64) (*layout.Solved, error) {
 	key := fmt.Sprint(ids, weights)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if sv, ok := s.cache[key]; ok {
+		s.mu.Unlock()
 		return sv, nil
 	}
+	if c, ok := s.inflight[key]; ok {
+		s.mu.Unlock()
+		<-c.done
+		return c.sv, c.err
+	}
+	c := &solveCall{done: make(chan struct{})}
+	s.inflight[key] = c
+	s.mu.Unlock()
+
 	lf := make([]layout.Feed, len(ids))
 	for i, id := range ids {
 		lf[i] = layout.Feed{Aspect: s.Feeds[id].Aspect, Weight: weights[id]}
 	}
-	sv, err := layout.Solve(lf)
-	if err != nil {
-		return nil, err
+	s.solving <- struct{}{}
+	c.sv, c.err = layout.Solve(lf)
+	<-s.solving
+
+	s.mu.Lock()
+	delete(s.inflight, key)
+	if c.err == nil {
+		s.cache[key] = c.sv
+		s.order = append(s.order, key)
+		if len(s.order) > 32 {
+			delete(s.cache, s.order[0])
+			s.order = s.order[1:]
+		}
 	}
-	s.cache[key] = sv
-	s.order = append(s.order, key)
-	if len(s.order) > 32 {
-		delete(s.cache, s.order[0])
-		s.order = s.order[1:]
+	s.mu.Unlock()
+	close(c.done)
+	return c.sv, c.err
+}
+
+// Close stops every feed's FFmpeg and waits for them (and any live-sound
+// FFmpeg) to exit.
+func (s *Server) Close() {
+	var wg sync.WaitGroup
+	for _, h := range s.Hubs {
+		if h != nil {
+			wg.Add(1)
+			go func(h *Hub) { defer wg.Done(); h.Stop() }(h)
+		}
 	}
-	return sv, nil
+	wg.Wait()
+	s.procs.Wait()
 }
 
 func (s *Server) Handler() http.Handler {
@@ -182,7 +222,9 @@ func (s *Server) apiLayout(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "weights: positive numbers", http.StatusBadRequest)
 				return
 			}
-			weights[i] = math.Round(x*100) / 100
+			// half steps from ½ to 10, so a few slider moves can't make
+			// dozens of distinct sizes
+			weights[i] = math.Min(10, math.Max(0.5, math.Round(x*2)/2))
 		}
 	}
 	sv, err := s.Solve(ids, weights)
@@ -199,7 +241,8 @@ func (s *Server) apiLayout(w http.ResponseWriter, r *http.Request) {
 		Smallest float64       `json:"smallest"`
 		Fill     float64       `json:"fill"`
 		Shapes   float64       `json:"shapes"`
-	}{wall.Tiles, wall.Smallest, wall.Fill, sv.Count()})
+		Evened   bool          `json:"evened,omitempty"` // sizes too varied; laid out equal
+	}{wall.Tiles, wall.Smallest, wall.Fill, sv.Count(), sv.Evened})
 }
 
 func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
@@ -371,13 +414,14 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 	g, err := f.Opened(octx, s.Tools)
 	ocancel()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, feeds.Redact(err.Error()), http.StatusBadGateway)
 		return
 	}
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "nobuffer", "-flags", "low_delay"}
 	args = append(args, g.InputArgs(10)...)
 	args = append(args, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", strconv.Itoa(AudioRate), "-f", "s16le", "pipe:1")
-	cmd := exec.CommandContext(ctx, s.Tools.FFmpeg, args...)
+	cmd := feeds.Child(exec.CommandContext(ctx, s.Tools.FFmpeg, args...))
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -387,8 +431,11 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.procs.Add(1)
+	defer s.procs.Done()
 	defer cmd.Wait()
 	defer cancel()
+	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Audio-Format", "s16le;rate="+strconv.Itoa(AudioRate)+";channels=1")
@@ -397,6 +444,7 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 	for {
 		n, err := out.Read(buf)
 		if n > 0 {
+			rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
 			}
@@ -433,8 +481,12 @@ func (s *Server) apiRecordings(w http.ResponseWriter, r *http.Request) {
 	}
 	out := struct {
 		Segment float64  `json:"segment"` // seconds per file, when this camwall records
+		Now     string   `json:"now"`     // the time on this computer's clock
+		Zone    string   `json:"zone"`
 		Folders []folder `json:"folders"`
 	}{Folders: make([]folder, 0, len(folders))}
+	now := time.Now()
+	out.Now, out.Zone = now.Format("2006-01-02T15:04:05"), now.Format("MST")
 	if s.Rec != nil {
 		out.Segment = s.Rec.Segment.Seconds()
 	}

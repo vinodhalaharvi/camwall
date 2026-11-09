@@ -191,7 +191,10 @@ func New(src string) Feed {
 			if display == "" {
 				display = ":0"
 			}
-			f.Format, f.Input = "x11grab", display+".0"
+			if i := strings.LastIndexByte(display, ':'); i < 0 || !strings.Contains(display[i:], ".") {
+				display += ".0" // a screen number, unless DISPLAY names one (":0.0")
+			}
+			f.Format, f.Input = "x11grab", display
 		}
 	case strings.HasPrefix(low, "ytdl:"):
 		f.Src = src[len("ytdl:"):]
@@ -227,6 +230,33 @@ func isOption(tok string) bool {
 	return false
 }
 
+// UniqueNames numbers feeds that share a name ("Door", "Door 2"), so every
+// tile, saved setting and recordings folder can tell them apart.
+func UniqueNames(fs []Feed) {
+	seen := map[string]int{}
+	for i := range fs {
+		seen[strings.ToLower(fs[i].Name)]++
+	}
+	used := map[string]bool{}
+	for _, f := range fs {
+		if seen[strings.ToLower(f.Name)] < 2 {
+			used[strings.ToLower(f.Name)] = true
+		}
+	}
+	for i := range fs {
+		base := fs[i].Name
+		if seen[strings.ToLower(base)] < 2 {
+			continue
+		}
+		name := base
+		for n := 2; used[strings.ToLower(name)]; n++ {
+			name = fmt.Sprintf("%s %d", base, n)
+		}
+		used[strings.ToLower(name)] = true
+		fs[i].Name = name
+	}
+}
+
 // ParseLine reads one line of a feeds file:
 //
 //	SOURCE [weight=N] [aspect=W:H] [format=F] [size=WxH] [fps=N]
@@ -237,7 +267,7 @@ func isOption(tok string) bool {
 // may contain spaces, except for other options at its end. Blank lines and
 // lines starting with # are skipped (ok is false).
 func ParseLine(line string) (f Feed, ok bool, err error) {
-	line = strings.TrimSpace(line)
+	line = strings.TrimSpace(strings.ReplaceAll(line, "\t", " ")) // tabs separate like spaces
 	if line == "" || strings.HasPrefix(line, "#") {
 		return f, false, nil
 	}
@@ -406,8 +436,10 @@ func (f Feed) inputArgs(fps int, wallclock bool) []string {
 	switch f.Kind {
 	case Image:
 		a = append(a, "-re", "-loop", "1", "-framerate", strconv.Itoa(fps))
+		a = append(a, f.netArgs()...) // a picture on a server
 	case GIF:
 		a = append(a, "-re", "-ignore_loop", "0")
+		a = append(a, f.netArgs()...)
 	case Video:
 		a = append(a, "-re")
 		if f.Format != "lavfi" {
@@ -437,6 +469,11 @@ func (f Feed) netArgs() []string {
 		return append(a, "-rtsp_flags", "prefer_tcp") // TCP if the camera offers it, else UDP
 	case "http", "https":
 		return []string{"-rw_timeout", "10000000", "-reconnect", "1", "-reconnect_streamed", "1"}
+	case "udp", "srt":
+		// give up on a silent source instead of waiting for ever (then retry)
+		return []string{"-timeout", "10000000"}
+	case "rtmp", "rtmps", "tcp":
+		return []string{"-rw_timeout", "10000000"}
 	}
 	return nil
 }

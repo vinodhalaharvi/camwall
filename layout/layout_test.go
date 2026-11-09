@@ -180,7 +180,7 @@ func TestManyCamerasAreFast(t *testing.T) {
 	}
 	w := s.Fit(16.0 / 9)
 	checkGeometry(t, feeds, 16.0/9, w)
-	if d := time.Since(start); d > 10*time.Second {
+	if d := time.Since(start); d > 10*time.Second && !raceOn {
 		t.Errorf("25 feeds took %v", d)
 	}
 	t.Logf("25 feeds: %d states, %.3g shapes, smallest %.4f, fill %.3f, %v",
@@ -209,5 +209,50 @@ func TestExtremeShapes(t *testing.T) {
 	}
 	for _, screen := range []float64{16.0 / 9, 32.0 / 9} {
 		checkGeometry(t, feeds, screen, s.Fit(screen))
+	}
+}
+
+// Many feeds in different sizes are bounded by MaxWork, and the solver
+// keeps no search tables once solved.
+func TestTooManySizesAreEvened(t *testing.T) {
+	var feeds []Feed
+	for i := range 25 {
+		w := 1.0
+		if i < 9 {
+			w = 1.5 + float64(i)*0.5 // ten different sizes
+		}
+		feeds = append(feeds, Feed{16.0 / 9, w})
+	}
+	start := time.Now()
+	if _, err := SolveUpTo(feeds, ExhaustiveUpTo); err != ErrTooManySizes {
+		t.Fatalf("want ErrTooManySizes, got %v", err)
+	}
+	sv, err := Solve(feeds)
+	if err != nil || !sv.Evened {
+		t.Fatalf("Solve should even out the sizes: %v", err)
+	}
+	if time.Since(start) > 3*time.Second && !raceOn {
+		t.Error("too slow")
+	}
+	// a typical enlarged wall still solves
+	feeds = feeds[:16]
+	for i := range feeds {
+		feeds[i].Weight = 1
+	}
+	feeds[0].Weight, feeds[1].Weight = 4, 2
+	if _, err := Solve(feeds); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFitOddScreens(t *testing.T) {
+	s, err := Solve([]Feed{{16.0 / 9, 1}, {4.0 / 3, 1}, {1, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, screen := range []float64{math.NaN(), 0, -1, math.Inf(1)} {
+		if w := s.Fit(screen); len(w.Tiles) != 3 {
+			t.Errorf("Fit(%v): %d tiles", screen, len(w.Tiles))
+		}
 	}
 }

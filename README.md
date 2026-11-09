@@ -41,7 +41,7 @@ Most IP cameras speak ONVIF. `camwall discover` finds them on your network and a
 camwall discover -user admin -password secret > cams.txt
 ```
 
-Add `-sub` to use each camera's lighter sub-stream, which is plenty for a wall. `camwall devices` lists the cameras and screens attached to this computer.
+Add `-sub` to use each camera's lighter sub-stream, which is plenty for a wall. `camwall devices` lists the cameras attached to this computer (and, on a Mac, the screens; on Linux the screen is just `screen`).
 
 ## What it can show
 
@@ -154,7 +154,7 @@ camwall stream -f cams.txt -o /var/www/wall/index.m3u8     # HLS for any browser
 camwall stream -f cams.txt -dry-run                        # print the FFmpeg command
 ```
 
-`-size 3840x2160` sets the output size and `-fps` the frame rate. `-labels` draws names, which needs FFmpeg built with `drawtext`. `-audio 3` carries feed 3's sound into the stream. `-encoder` picks the video encoder: `libx265`, or a hardware one such as `h264_videotoolbox` on a Mac, `h264_nvenc` or `h264_qsv`, with `-bitrate`. If FFmpeg stops, for example because a camera dropped out, camwall restarts it.
+`-size 3840x2160` sets the output size and `-fps` the frame rate. `-labels` draws names, which needs FFmpeg built with `drawtext`; `-font FILE` picks the font for them. `-audio 3` carries feed 3's sound into the stream. `-encoder` picks the video encoder: `libx265`, or a hardware one such as `h264_videotoolbox` on a Mac, `h264_nvenc` or `h264_qsv`, with `-bitrate`. If FFmpeg stops, for example because a camera dropped out, camwall restarts it.
 
 For RTMP destinations such as YouTube Live, Twitch or Facebook Live, camwall sends what these platforms expect: a constant bitrate sized to the output (4 Mbps at 720p, 6 Mbps at 1080p, or `-bitrate`), keyframes every 2 seconds, and a sound track. That's a silent one unless you pick a feed with `-audio`, because YouTube rejects streams without sound. YouTube's first live stream on a channel can take up to 24 hours to be enabled, and it ends streams after 12 hours; camwall reconnects by itself. For shop cameras, make the stream Unlisted or Private.
 
@@ -181,7 +181,8 @@ The layout is a dynamic program written with [dyna](https://github.com/vinodhala
 
 - **Feeds are grouped into kinds.** Cameras that share a shape and a weight are interchangeable, so the search tracks how many of each kind are left rather than which ones. Sixteen identical cameras give 17 subproblems instead of 65,536, which is why camwall handles 25 feeds where collage stops at 10.
 - **Nothing is cropped.** Each tile keeps its feed's exact shape, and the wall is letterboxed into the screen. The score is the on-screen area of the smallest feed per unit of weight. It's maximised with the (max, min) semiring, graded by aspect ratio, so fitting the wall to a new screen shape is a lookup rather than a new search.
-- **Big walls stay fast.** Groups of up to 6 feeds are split every possible way. Larger groups only split off blocks of one kind, such as a row of identical cameras. On the walls we compared against the full search, this lost at most 5% of the smallest feed's size and was usually exact.
+- **Big walls stay fast.** Groups of up to 6 feeds are split every possible way. Larger groups split off a block of one kind (such as a row of identical cameras) or one or two other feeds, and groups of up to 10 are also halved every way. Against a brute-force search on random mixed walls of 7 to 10 feeds, the median result was the best possible, 9 in 10 were within 5%, and the worst was 15% short of it.
+- **Too many different sizes are evened out.** Every distinct size is another kind, and the search grows quickly with kinds. When the sizes asked for would take more than a second or two to search (25 feeds in four or more sizes, say), camwall lays the feeds out at equal size instead and says so.
 
 `camwall laws` checks that the algebra obeys the semiring laws that make this correct, and compares the dynamic program with brute force.
 
@@ -189,6 +190,8 @@ The layout is a dynamic program written with [dyna](https://github.com/vinodhala
 
 - `camwall serve` listens only on this computer unless you give `-addr :7788`. On a shop network, add `-password`; it protects the wall, the live sound and the recordings alike.
 - Camera addresses and their passwords stay on the computer running camwall. Browsers get only the names you give the feeds, and the pictures.
+- Without `-password`, camwall answers only to IP addresses and local names (`localhost`, `shop-pc`, `shop-pc.local`), so a web page elsewhere can't reach it through a viewer's browser by pointing its own domain at this computer. Use `-password` to reach it under another name.
+- Error messages from cameras are shown with any user names, passwords and tokens in their addresses hidden.
 - camwall serves plain HTTP. To watch from outside the shop, use a private network such as [Tailscale](https://tailscale.com) or a tunnel with HTTPS, rather than opening a port on the router.
 - Cameras and microphones in a shop are regulated in many places (signs, consent, how long recordings may be kept). Check the rules that apply to you.
 

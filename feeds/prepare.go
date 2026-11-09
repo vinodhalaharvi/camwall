@@ -38,9 +38,13 @@ func Resolve(ctx context.Context, ytdlp, page string) (media string, live bool, 
 	if ytdlp == "" {
 		return "", false, ErrNoYtDlp
 	}
-	out, err := exec.CommandContext(ctx, ytdlp, "--no-warnings", "--no-playlist",
+	if strings.HasPrefix(page, "-") {
+		return "", false, fmt.Errorf("not a web page: %q", page)
+	}
+	// "--": the page is never read as one of yt-dlp's options
+	out, err := Child(exec.CommandContext(ctx, ytdlp, "--no-warnings", "--no-playlist",
 		"-f", "best[height<=720][vcodec!=none]/bestvideo[height<=720]/best",
-		"--print", "is_live", "--print", "url", page).Output()
+		"--print", "is_live", "--print", "url", "--", page)).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return "", false, fmt.Errorf("yt-dlp: %s", firstLine(string(ee.Stderr)))
@@ -48,7 +52,7 @@ func Resolve(ctx context.Context, ytdlp, page string) (media string, live bool, 
 		return "", false, err
 	}
 	lines := strings.Fields(strings.TrimSpace(string(out)))
-	if len(lines) < 2 || !strings.HasPrefix(lines[len(lines)-1], "http") {
+	if len(lines) < 2 || !(strings.HasPrefix(lines[len(lines)-1], "https://") || strings.HasPrefix(lines[len(lines)-1], "http://")) {
 		return "", false, fmt.Errorf("yt-dlp found no video on %s", page)
 	}
 	return lines[len(lines)-1], lines[0] == "True", nil
@@ -342,7 +346,7 @@ func Prepare(fs []Feed, t Tools, timeout time.Duration) error {
 			}
 			if f.IsFile() && (f.Kind == Image || f.Kind == GIF || imageExt[strings.ToLower(filepath.Ext(f.Src))]) {
 				if err := preparePicture(ctx, t, f, i); err != nil {
-					errs[i] = fmt.Errorf("%s: %w", f.Src, err)
+					errs[i] = fmt.Errorf("%s: %w", Redact(f.Src), err)
 					return
 				}
 			}
@@ -351,10 +355,10 @@ func Prepare(fs []Feed, t Tools, timeout time.Duration) error {
 				var err error
 				if g, err = f.Opened(ctx, t); err != nil {
 					if err == ErrNoYtDlp {
-						errs[i] = fmt.Errorf("%s: %w", f.Src, err)
+						errs[i] = fmt.Errorf("%s: %w", Redact(f.Src), err)
 						return
 					}
-					f.Aspect, f.Note = 16.0/9, "could not open the page ("+err.Error()+"); assuming 16:9"
+					f.Aspect, f.Note = 16.0/9, "could not open the page ("+Redact(err.Error())+"); assuming 16:9"
 					return
 				}
 				f.Kind = g.Kind
@@ -369,7 +373,14 @@ func Prepare(fs []Feed, t Tools, timeout time.Duration) error {
 // settle probes the shape (and sound) of an opened feed g into f. With a
 // filter=, the shape is the filter's output.
 func settle(f, g Feed, ctx context.Context, t Tools) Feed {
-	if f.fixed {
+	if f.fixed { // shape given: still find out whether it has sound
+		if t.FFprobe != "" && f.Kind != Image && f.Kind != GIF {
+			if err := Probe(ctx, t.FFprobe, &g); err != nil {
+				f.Note = "could not check it for sound (" + Redact(err.Error()) + ")"
+			} else {
+				f.Audio = g.Audio
+			}
+		}
 		return f
 	}
 	var err error
@@ -383,7 +394,7 @@ func settle(f, g Feed, ctx context.Context, t Tools) Feed {
 		return f
 	}
 	if err != nil {
-		reason := err.Error()
+		reason := Redact(err.Error())
 		if ctx.Err() != nil {
 			reason = "no answer in time"
 		}

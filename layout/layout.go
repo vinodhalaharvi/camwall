@@ -130,7 +130,7 @@ func SplitsUpTo(kinds, exhaustive int) dyna.Coalgebra[State, Step] {
 			if a == s || !lessEq(a, b, kinds) {
 				continue
 			}
-			if total > exhaustive && !pure(a, kinds) && !pure(b, kinds) {
+			if total > exhaustive && !pure(a, kinds) && !pure(b, kinds) && !mixedOK(a, total, kinds) {
 				continue
 			}
 			out = append(out,
@@ -138,6 +138,21 @@ func SplitsUpTo(kinds, exhaustive int) dyna.Coalgebra[State, Step] {
 				dyna.Node[Step, State]{Label: Step{Cut: V}, Kids: []State{a, b}})
 		}
 	}
+}
+
+// MixedSmall and BalancedUpTo (variables for tests) widen the splits of
+// sub-walls past ExhaustiveUpTo.
+var MixedSmall, BalancedUpTo = 2, 10
+
+// mixedOK keeps two kinds of mixed split in larger sub-walls: a small mixed
+// group (up to MixedSmall feeds) beside the rest, and, up to BalancedUpTo
+// feeds, an even halving.
+func mixedOK(a State, total, kinds int) bool {
+	n := 0
+	for i := 0; i < kinds; i++ {
+		n += int(a[i])
+	}
+	return n <= MixedSmall || (total <= BalancedUpTo && 2*n >= total-1)
 }
 
 // pure reports whether a side holds only one kind of feed.
@@ -263,9 +278,19 @@ type Solved struct {
 	Feeds  []Feed
 	kinds  []Feed
 	kindOf []int // feed index → kind
-	grades *Grades
-	root   dyna.Vec[Cell]
-	Stats  dyna.Stats
+	// the best wall for each shape, re-folded with the exact aspects. Only
+	// these are kept: the search tables behind them are freed once solved.
+	cands []cand
+	count float64
+	Stats dyna.Stats
+	// Evened is set when the requested sizes were too varied to search and
+	// every feed was given the same size instead.
+	Evened bool
+}
+
+type cand struct {
+	tree  *Node
+	share float64
 }
 
 // SameShape is how close two aspect ratios must be (1%) for feeds to count
@@ -311,9 +336,49 @@ func Group(feeds []Feed) (kinds []Feed, kindOf []int, err error) {
 	return kinds, kindOf, nil
 }
 
-// Solve searches every gap-free guillotine wall of the feeds.
+// MaxWork bounds a solve: the number of subproblems (one per way of
+// choosing how many feeds of each kind are left) times the number of feeds.
+// Every distinct size makes another kind, and the work grows fast with kinds:
+// 25,000 is about 1.5 s on one core; 25 feeds in 10 kinds would need
+// gigabytes. Past it, Solve evens out the sizes (see Solve).
+var MaxWork = 25000
+
+// ErrTooManySizes is returned when the feeds have too many different shapes
+// and sizes to solve quickly.
+var ErrTooManySizes = errors.New("too many different feed sizes at once to lay out quickly; give more feeds the same size")
+
+// Work is the cost estimate MaxWork bounds.
+func Work(kindOf []int) int {
+	counts := map[int]int{}
+	for _, k := range kindOf {
+		counts[k]++
+	}
+	states := 1
+	for _, c := range counts {
+		states *= c + 1
+		if states > MaxWork {
+			return MaxWork + 1
+		}
+	}
+	return states * len(kindOf)
+}
+
+// Solve searches every gap-free guillotine wall of the feeds. When the
+// feeds have too many different sizes to search quickly, it lays them out at
+// equal size instead and sets Evened.
 func Solve(feeds []Feed) (*Solved, error) {
-	return SolveUpTo(feeds, ExhaustiveUpTo)
+	sv, err := SolveUpTo(feeds, ExhaustiveUpTo)
+	if err != ErrTooManySizes {
+		return sv, err
+	}
+	even := make([]Feed, len(feeds))
+	for i, f := range feeds {
+		even[i] = Feed{Aspect: f.Aspect, Weight: 1}
+	}
+	if sv, err = SolveUpTo(even, ExhaustiveUpTo); sv != nil {
+		sv.Evened = true
+	}
+	return sv, err
 }
 
 // SolveUpTo is Solve with a different exhaustive limit (for tests).
@@ -321,6 +386,9 @@ func SolveUpTo(feeds []Feed, exhaustive int) (*Solved, error) {
 	kinds, kindOf, err := Group(feeds)
 	if err != nil {
 		return nil, err
+	}
+	if Work(kindOf) > MaxWork {
+		return nil, ErrTooManySizes
 	}
 	var goal State
 	for _, k := range kindOf {
@@ -336,18 +404,20 @@ func SolveUpTo(feeds []Feed, exhaustive int) (*Solved, error) {
 		norm[i] = kinds[kindOf[i]]
 		norm[i].Aspect = f.Aspect
 	}
-	return &Solved{Feeds: norm, kinds: kinds, kindOf: kindOf, grades: gr, root: root, Stats: st}, nil
+	sv := &Solved{Feeds: norm, kinds: kinds, kindOf: kindOf, Stats: st}
+	for _, b := range root.NZ {
+		sv.count += root.At[b].A
+		for _, e := range root.At[b].B {
+			n, share := sv.exact(e, make([]int, len(kinds)))
+			sv.cands = append(sv.cands, cand{n, share})
+		}
+	}
+	return sv, nil
 }
 
 // Count is how many distinct wall shapes were searched (mirror images and
 // swaps of identical feeds counted once).
-func (s *Solved) Count() float64 {
-	total := 0.0
-	for _, b := range s.root.NZ {
-		total += s.root.At[b].A
-	}
-	return total
-}
+func (s *Solved) Count() float64 { return s.count }
 
 // ---------- Reading a wall out ----------
 
@@ -405,16 +475,16 @@ func (s *Solved) exact(e *dyna.Entry[Step], next []int) (*Node, float64) {
 // the given aspect ratio (width / height). The wall keeps every feed's shape
 // exactly and is centred with bars where it does not fill the screen.
 func (s *Solved) Fit(screen float64) Wall {
+	if !(screen > 0) || math.IsInf(screen, 0) {
+		screen = 16.0 / 9 // a nonsense screen shape gets an ordinary one
+	}
 	var best Wall
 	bestRank := -1.0
-	for _, b := range s.root.NZ {
-		for _, e := range s.root.At[b].B {
-			n, share := s.exact(e, make([]int, len(s.kinds)))
-			fill := math.Min(n.A/screen, screen/n.A)
-			if rank := share * fill; rank > bestRank+1e-12 {
-				bestRank = rank
-				best = Wall{Aspect: n.A, Smallest: rank, Fill: fill, Tree: n}
-			}
+	for _, c := range s.cands {
+		fill := math.Min(c.tree.A/screen, screen/c.tree.A)
+		if rank := c.share * fill; rank > bestRank+1e-12 {
+			bestRank = rank
+			best = Wall{Aspect: c.tree.A, Smallest: rank, Fill: fill, Tree: c.tree}
 		}
 	}
 	// place the wall, centred

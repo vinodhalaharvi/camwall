@@ -1,6 +1,7 @@
 package feeds
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -141,5 +142,25 @@ v4l2:/dev/video0 format=mjpeg name=USB cam`), "x")
 		if _, err := Read(strings.NewReader(bad), "x"); err == nil {
 			t.Errorf("%q: want an error", bad)
 		}
+	}
+}
+
+func TestUniqueNamesTabsDisplay(t *testing.T) {
+	fs := []Feed{{Name: "Door"}, {Name: "Yard"}, {Name: "door"}, {Name: "Door 2"}, {Name: "Door"}}
+	UniqueNames(fs)
+	got := []string{}
+	for _, f := range fs {
+		got = append(got, f.Name)
+	}
+	if strings.Join(got, "|") != "Door|Yard|door 3|Door 2|Door 4" {
+		t.Errorf("UniqueNames: %v", got)
+	}
+	f, ok, err := ParseLine("rtsp://10.0.0.5/live\tweight=2\tname=Front door")
+	if !ok || err != nil || f.Weight != 2 || f.Name != "Front door" {
+		t.Errorf("tabs: %+v %v", f, err)
+	}
+	t.Setenv("DISPLAY", ":1.0")
+	if g := New("screen"); runtime.GOOS == "linux" && g.Input != ":1.0" {
+		t.Errorf("DISPLAY: %q", g.Input)
 	}
 }

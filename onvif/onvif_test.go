@@ -128,3 +128,23 @@ func TestDiscover(t *testing.T) {
 		t.Errorf("device %+v", d)
 	}
 }
+
+func TestUntrustedAnswers(t *testing.T) {
+	if got := Clean("Lobby\nfile:///etc/passwd format=rawvideo # x"); got != "Lobby file:///etc/passwd format rawvideo x" {
+		t.Errorf("Clean: %q", got)
+	}
+	for _, bad := range []string{"file:///etc/passwd", "rtsp://cam/live format=rawvideo", "http://cam/x", "rtsp:///nohost"} {
+		if _, ok := safeStreamURI(bad); ok {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	if _, ok := safeStreamURI("rtsp://10.0.0.5:554/Streaming/101"); !ok {
+		t.Error("rejected a plain camera address")
+	}
+	// a probe answer naming another host is talked to on the address it came from
+	b := []byte(`<?xml version="1.0"?><e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery"><e:Body><d:ProbeMatches><d:ProbeMatch><d:XAddrs>http://evil.example:8080/onvif/device_service</d:XAddrs><d:Scopes>onvif://www.onvif.org/name/Lobby%0Afile:///etc/passwd</d:Scopes></d:ProbeMatch></d:ProbeMatches></e:Body></e:Envelope>`)
+	ds := parseProbeMatch(b, "10.0.0.9")
+	if len(ds) != 1 || ds[0].XAddr != "http://10.0.0.9:8080/onvif/device_service" || strings.ContainsAny(ds[0].Name, "\n=") {
+		t.Errorf("parse: %+v", ds)
+	}
+}

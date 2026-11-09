@@ -12,12 +12,12 @@ package record
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,8 +57,8 @@ var unsafe = regexp.MustCompile(`[^\p{L}\p{N} ._()&'+,-]+`)
 func FolderName(i int, name string) string {
 	n := strings.TrimSpace(unsafe.ReplaceAllString(name, "_"))
 	n = strings.Trim(n, ". ")
-	if len(n) > 60 {
-		n = n[:60]
+	if r := []rune(n); len(r) > 60 {
+		n = string(r[:60])
 	}
 	return fmt.Sprintf("%02d %s", i+1, n)
 }
@@ -71,7 +71,6 @@ func (r *Recorder) Run(ctx context.Context) {
 	if r.Bitrate == "" {
 		r.Bitrate = "48k"
 	}
-	r.status = map[int]string{}
 	var wg sync.WaitGroup
 	for i, f := range r.Feeds {
 		if !Wants(f) {
@@ -118,6 +117,9 @@ func (r *Recorder) Status() map[int]string {
 
 func (r *Recorder) set(i int, s string) {
 	r.mu.Lock()
+	if r.status == nil {
+		r.status = map[int]string{}
+	}
 	r.status[i] = s
 	r.mu.Unlock()
 }
@@ -131,7 +133,17 @@ func (r *Recorder) Args(f feeds.Feed, dir string) []string {
 		"-reset_timestamps", "1", "-strftime", "1",
 		// one-second fragments, flushed as written: a crash loses at most a second
 		"-segment_format", "mp4", "-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof:frag_duration=1000000:flush_packets=1",
-		filepath.Join(dir, "%Y-%m-%d_%H-%M-%S.m4a"))
+		filepath.Join(dir, namePattern()))
+}
+
+// namePattern names each file by its local start time and, where strftime
+// gives it as a number, the UTC offset: the hour that repeats when clocks go
+// back then gets different names instead of overwriting the first.
+func namePattern() string {
+	if runtime.GOOS == "windows" { // %z is a zone name there, not an offset
+		return "%Y-%m-%d_%H-%M-%S.m4a"
+	}
+	return "%Y-%m-%d_%H-%M-%S%z.m4a"
 }
 
 func (r *Recorder) loop(ctx context.Context, i int, f feeds.Feed, dir string) {
@@ -143,7 +155,10 @@ func (r *Recorder) loop(ctx context.Context, i int, f feeds.Feed, dir string) {
 		cancel()
 		if err == nil {
 			r.set(i, "recording")
-			cmd := exec.CommandContext(ctx, r.Tools.FFmpeg, r.Args(g, dir)...)
+			cmd := feeds.Child(exec.CommandContext(ctx, r.Tools.FFmpeg, r.Args(g, dir)...))
+			// let FFmpeg close the file it is writing, then insist
+			cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+			cmd.WaitDelay = 5 * time.Second
 			var tail strings.Builder
 			cmd.Stderr = &limited{b: &tail, n: 2048}
 			err = cmd.Run()
@@ -151,7 +166,7 @@ func (r *Recorder) loop(ctx context.Context, i int, f feeds.Feed, dir string) {
 				return
 			}
 			if msg := strings.TrimSpace(tail.String()); msg != "" {
-				err = fmt.Errorf("%s", lastLine(msg))
+				err = fmt.Errorf("%s", feeds.Redact(lastLine(msg)))
 			}
 			if strings.Contains(tail.String(), "matches no streams") {
 				log.Printf("record: feed %d (%s) has no sound; not recording it", i+1, f.Name)
@@ -164,7 +179,7 @@ func (r *Recorder) loop(ctx context.Context, i int, f feeds.Feed, dir string) {
 		if time.Since(start) > time.Minute {
 			backoff = 2 * time.Second
 		}
-		log.Printf("record: feed %d (%s): %v; retrying in %v", i+1, f.Name, err, backoff)
+		log.Printf("record: feed %d (%s): %s; retrying in %v", i+1, f.Name, feeds.Redact(fmt.Sprint(err)), backoff)
 		select {
 		case <-ctx.Done():
 			return
@@ -195,12 +210,17 @@ func lastLine(s string) string {
 
 // ---------- Listing and pruning ----------
 
-var fileName = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.m4a$`)
+var folderName = regexp.MustCompile(`^\d{2,} `)
+
+var fileName = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})([+-]\d{4})?\.m4a$`)
 
 // File is one recorded segment.
 type File struct {
 	Name  string    `json:"name"`
 	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`   // last written (the file may be shorter than a segment)
+	Clock string    `json:"clock"` // start on the recording computer's clock, 2006-01-02T15:04:05
+	Zone  string    `json:"zone"`  // that clock's zone, like EST or +0100
 	Size  int64     `json:"size"`
 }
 
@@ -228,11 +248,14 @@ func List(dir string) ([]Folder, error) {
 		files, _ := os.ReadDir(filepath.Join(dir, e.Name()))
 		for _, f := range files {
 			if t, ok := startOf(f.Name()); ok {
-				var size int64
+				file := File{Name: f.Name(), Start: t, End: t, Clock: t.Format("2006-01-02T15:04:05"), Zone: t.Format("MST")}
 				if info, err := f.Info(); err == nil {
-					size = info.Size()
+					file.Size = info.Size()
+					if m := info.ModTime(); m.After(t) {
+						file.End = m
+					}
 				}
-				fd.Files = append(fd.Files, File{Name: f.Name(), Start: t, Size: size})
+				fd.Files = append(fd.Files, file)
 			}
 		}
 		sort.Slice(fd.Files, func(i, j int) bool { return fd.Files[i].Start.After(fd.Files[j].Start) })
@@ -245,6 +268,17 @@ func startOf(name string) (time.Time, bool) {
 	m := fileName.FindStringSubmatch(name)
 	if m == nil {
 		return time.Time{}, false
+	}
+	if m[5] != "" {
+		t, err := time.Parse("2006-01-02 15 04 05 -0700", m[1]+" "+m[2]+" "+m[3]+" "+m[4]+" "+m[5])
+		if err != nil {
+			return time.Time{}, false
+		}
+		// keep the local zone's name when the offset matches it
+		if l := t.In(time.Local); l.Format("-0700") == m[5] {
+			t = l
+		}
+		return t, true
 	}
 	t, err := time.ParseInLocation("2006-01-02 15 04 05", m[1]+" "+m[2]+" "+m[3]+" "+m[4], time.Local)
 	return t, err == nil
@@ -268,15 +302,23 @@ func (r *Recorder) Prune(now time.Time) {
 	if r.Keep <= 0 {
 		return
 	}
-	filepath.WalkDir(r.Dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	// only recordings in camwall's own feed folders: never anything else under Dir
+	folders, _ := os.ReadDir(r.Dir)
+	for _, fd := range folders {
+		if !fd.IsDir() || !folderName.MatchString(fd.Name()) {
+			continue
 		}
-		if t, ok := startOf(d.Name()); ok && now.Sub(t) > r.Keep+r.Segment {
-			if err := os.Remove(p); err == nil {
-				log.Printf("record: removed %s (older than %v)", p, r.Keep)
+		files, _ := os.ReadDir(filepath.Join(r.Dir, fd.Name()))
+		for _, f := range files {
+			if f.IsDir() {
+				continue
+			}
+			if t, ok := startOf(f.Name()); ok && now.Sub(t) > r.Keep+r.Segment {
+				p := filepath.Join(r.Dir, fd.Name(), f.Name())
+				if err := os.Remove(p); err == nil {
+					log.Printf("record: removed %s (older than %v)", p, r.Keep)
+				}
 			}
 		}
-		return nil
-	})
+	}
 }

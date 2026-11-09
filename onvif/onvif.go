@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Device is a camera that answered the discovery probe.
@@ -80,20 +81,38 @@ func parseProbeMatch(b []byte, from string) []Device {
 		if len(addrs) == 0 {
 			continue
 		}
-		d := Device{Addr: from, All: addrs, XAddr: addrs[0]}
-		// prefer the address on the network it answered from (cameras often list several)
+		d := Device{Addr: from, All: addrs}
+		// use the address it answered from (cameras often list several); if
+		// it lists none on that address, talk to that address anyway, so an
+		// answer cannot send camwall (and a login) to some other host
 		for _, a := range addrs {
-			if u, err := url.Parse(a); err == nil && u.Hostname() == from {
+			if u, err := url.Parse(a); err == nil && u.Hostname() == from && (u.Scheme == "http" || u.Scheme == "https") {
 				d.XAddr = a
 				break
 			}
 		}
+		if d.XAddr == "" {
+			u, err := url.Parse(addrs[0])
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+				continue
+			}
+			if p := u.Port(); p != "" {
+				u.Host = net.JoinHostPort(from, p)
+			} else if strings.Contains(from, ":") {
+				u.Host = "[" + from + "]"
+			} else {
+				u.Host = from
+			}
+			d.XAddr = u.String()
+		}
 		for _, s := range strings.Fields(m.Scopes) {
 			if v, ok := strings.CutPrefix(s, "onvif://www.onvif.org/name/"); ok {
 				d.Name, _ = url.PathUnescape(v)
+				d.Name = Clean(d.Name)
 			}
 			if v, ok := strings.CutPrefix(s, "onvif://www.onvif.org/hardware/"); ok {
 				d.Model, _ = url.PathUnescape(v)
+				d.Model = Clean(d.Model)
 			}
 		}
 		out = append(out, d)
@@ -279,14 +298,61 @@ func (c *Client) Streams(ctx context.Context, deviceXAddr string) ([]Stream, err
 		if su.URI == "" {
 			continue
 		}
-		name := p.Name
+		name := Clean(p.Name)
 		if name == "" {
-			name = p.Token
+			name = Clean(p.Token)
 		}
-		out = append(out, Stream{Profile: name, Width: p.Width, Height: p.Hgt, URI: withCredentials(sameHost(su.URI, deviceXAddr), c.User, c.Password)})
+		uri, ok := safeStreamURI(sameHost(su.URI, deviceXAddr))
+		if !ok {
+			continue // not something to put in a feeds file
+		}
+		// the login goes only to the camera we asked, never to another host it names
+		if hostOf(uri) == hostOf(deviceXAddr) {
+			uri = withCredentials(uri, c.User, c.Password)
+		}
+		out = append(out, Stream{Profile: name, Width: p.Width, Height: p.Hgt, URI: uri})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Width*out[i].Height > out[j].Width*out[j].Height })
 	return out, nil
+}
+
+// Clean makes text a camera reports safe to print in a feeds file line or
+// comment: no control characters (so no new lines), none of = # " ', single
+// spaces, at most 60 characters.
+func Clean(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || strings.ContainsRune("=#\"'`", r) {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > 60 {
+		s = string(r[:60])
+	}
+	return s
+}
+
+// safeStreamURI accepts only an rtsp:// or rtsps:// address with no spaces or
+// control characters, so a camera cannot make camwall read local files or
+// slip options into a feeds file.
+func safeStreamURI(s string) (string, bool) {
+	if strings.IndexFunc(s, func(r rune) bool { return r <= ' ' || r == 0x7f || r == '"' || r == '#' }) >= 0 {
+		return "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "rtsp" && u.Scheme != "rtsps") || u.Hostname() == "" {
+		return "", false
+	}
+	return u.String(), true
+}
+
+func hostOf(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // sameHost replaces an address the camera reports for itself when it is a

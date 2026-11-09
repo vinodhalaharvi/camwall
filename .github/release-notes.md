@@ -1,3 +1,12 @@
+**0.1.1** fixes what two independent reviews found:
+
+- Safer by default: camera passwords and tokens are hidden in messages; without `-password` the wall answers only to IP addresses and local names; `discover` no longer trusts what a camera says about other hosts; the user name for `-password` is `camwall`, as documented.
+- Steadier: stopping camwall stops every FFmpeg it started (even if camwall is killed); a feed never runs two FFmpegs at once; silent UDP/SRT sources time out and retry; a big or odd request can't run the server out of memory.
+- Better walls of 7 to 10 feeds (more ways to split are searched), and very varied sizes are evened out instead of refused.
+- Recordings: the hour that repeats when clocks go back no longer overwrites files, times are shown on the recording computer's clock, and old files are pruned only in camwall's own folders.
+- Browser: errors show as a note that clears itself, hidden feeds can't stay zoomed, smoother live sound, keyboard zoom for tiles, a way out of the hidden-bar mode on phones, and browser shortcuts like Ctrl+S are left alone.
+- Labels with apostrophes or % signs, feeds files with tabs, and duplicate feed names all work.
+
 Install with Homebrew (FFmpeg comes with it):
 ```sh
 brew install vinodhalaharvi/tap/camwall

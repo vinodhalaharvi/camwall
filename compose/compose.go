@@ -63,9 +63,11 @@ func Place(w layout.Wall, fs []feeds.Feed, o Options) []Rect {
 	return out
 }
 
-// escape quotes text for a filter argument.
+// escape quotes text for a filter argument. A straight apostrophe cannot be
+// quoted reliably through FFmpeg's two levels of filter escaping, so it
+// becomes a typographic one (’), which looks the same in a label.
 func escape(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `'`, `'\''`, `:`, `\:`, `%`, `\%`)
+	r := strings.NewReplacer(`\`, `\\`, `'`, `’`, `:`, `\:`, "\n", " ", "\r", " ")
 	return "'" + r.Replace(s) + "'"
 }
 
@@ -90,7 +92,7 @@ func Filter(rects []Rect, fs []feeds.Feed, o Options) string {
 			if o.Font != "" {
 				font = "fontfile=" + escape(o.Font) + ":"
 			}
-			fmt.Fprintf(&b, ",drawtext=%stext=%s:fontsize=%d:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=%d:x=%d:y=h-th-%d",
+			fmt.Fprintf(&b, ",drawtext=%sexpansion=none:text=%s:fontsize=%d:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=%d:x=%d:y=h-th-%d",
 				font, escape(fs[i].Name), size, size/3, size/2, size/2)
 		}
 		fmt.Fprintf(&b, "[v%d];", i)

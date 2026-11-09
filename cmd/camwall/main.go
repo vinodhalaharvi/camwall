@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,7 +30,17 @@ import (
 	"github.com/vinodhalaharvi/camwall/wall"
 )
 
-var version = "dev"
+var version = "dev" // set by release builds with -ldflags "-X main.version=…"
+
+func init() {
+	// `go install …@v0.1.1` records the module version; use it when no
+	// release build set one
+	if version == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			version = strings.TrimPrefix(bi.Main.Version, "v")
+		}
+	}
+}
 
 const usage = `camwall puts every camera feed on one gap-free wall.
 
@@ -252,6 +263,7 @@ func (c *common) load(srcs []string, needFFmpeg bool) ([]feeds.Feed, feeds.Tools
 	}
 	t.TempDir = tmpDir
 	fmt.Fprintf(os.Stderr, "Getting %d feed%s ready…\n", len(fs), plural(len(fs)))
+	feeds.UniqueNames(fs)
 	if err := feeds.Prepare(fs, t, 20*time.Second); err != nil {
 		return nil, t, err
 	}
@@ -343,6 +355,8 @@ func serve(args []string) error {
 	h := srv.Handler()
 	if *password != "" {
 		h = basicAuth(h, *password)
+	} else {
+		h = localNamesOnly(h)
 	}
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -362,18 +376,29 @@ func serve(args []string) error {
 	if !*noOpen {
 		go openBrowser(url)
 	}
-	hs := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	// every request's context ends at shutdown, so live streams and sound end too
+	reqCtx, endRequests := context.WithCancel(context.Background())
+	hs := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return reqCtx }}
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 		<-ch
+		endRequests()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		hs.Shutdown(ctx)
 	}()
-	if err := hs.Serve(ln); err != http.ErrServerClosed {
+	err = hs.Serve(ln)
+	if err != http.ErrServerClosed {
+		endRequests()
+		srv.Close()
 		return err
 	}
+	<-stopped
+	srv.Close() // stop every FFmpeg before exiting
 	return nil
 }
 
@@ -384,8 +409,8 @@ func parseKeep(s string) (time.Duration, error) {
 	}
 	if d, ok := strings.CutSuffix(s, "d"); ok {
 		n, err := strconv.ParseFloat(d, 64)
-		if err != nil || n < 0 {
-			return 0, fmt.Errorf("-keep %q: want days like 7d, hours like 36h, or 0", s)
+		if err != nil || !(n >= 0 && n <= 100*365) { // also refuses NaN and Inf
+			return 0, fmt.Errorf("-keep %q: want days like 7d (up to 100 years), hours like 36h, or 0", s)
 		}
 		return time.Duration(n * 24 * float64(time.Hour)), nil
 	}
@@ -459,10 +484,44 @@ func recordCmd(args []string) error {
 	return nil
 }
 
+// localNamesOnly refuses requests addressed to a public host name. Without a
+// password, that stops a web page elsewhere from pointing its own domain at
+// this computer (DNS rebinding) and reading the cameras through a viewer's
+// browser. IP addresses and local names (localhost, myhost, myhost.local)
+// work as before.
+func localNamesOnly(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !localHost(r.Host) {
+			http.Error(w, "camwall answers to IP addresses and local names only; start it with -password to use other names", http.StatusForbidden)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+func localHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if host == "" || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
+		return true
+	}
+	for _, suf := range []string{".localhost", ".local", ".lan", ".home.arpa", ".internal"} {
+		if strings.HasSuffix(host, suf) {
+			return true
+		}
+	}
+	return false
+}
+
 func basicAuth(h http.Handler, password string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, p, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(p), []byte(password)) != 1 {
+		u, p, ok := r.BasicAuth()
+		userOK := subtle.ConstantTimeCompare([]byte(u), []byte("camwall"))
+		passOK := subtle.ConstantTimeCompare([]byte(p), []byte(password))
+		if !ok || userOK&passOK != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="camwall"`)
 			http.Error(w, "password required", http.StatusUnauthorized)
 			return
@@ -607,7 +666,7 @@ func stream(args []string) error {
 			backoff = min(2*backoff, 30*time.Second)
 			continue
 		}
-		cmd := exec.Command(tools.FFmpeg, args...)
+		cmd := feeds.Child(exec.Command(tools.FFmpeg, args...))
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		if err := cmd.Start(); err != nil {
 			return err
@@ -673,7 +732,15 @@ func plan(args []string) error {
 	}
 	wl := sv.Fit(screen)
 	fmt.Print(sketch(wl, screen, 72))
-	fmt.Printf("\nWall fills %.0f%% of a %s screen; the smallest feed gets %.1f%% of it.\n\n", 100*wl.Fill, *ratio, 100*wl.Smallest)
+	smallest := 1.0
+	for _, t := range wl.Tiles {
+		smallest = math.Min(smallest, t.W*t.H)
+	}
+	fmt.Printf("\nWall fills %.0f%% of a %s screen; the smallest feed gets %.1f%% of it.\n", 100*wl.Fill, *ratio, 100*smallest)
+	if sv.Evened {
+		fmt.Println("The sizes asked for were too varied to search quickly, so every feed is shown the same size.")
+	}
+	fmt.Println()
 	for _, t := range wl.Tiles {
 		f := feedsList[t.Feed]
 		fmt.Printf("  %2d  %-28s %5.1f%% of screen  (%.2f:1%s)\n", t.Feed+1, trim(f.Name, 28), 100*t.W*t.H, f.Aspect, weightNote(f.Weight))
@@ -845,7 +912,7 @@ func discover(args []string) error {
 			authFailed = true
 			fmt.Printf("# %s (%s %s): needs the camera's user name and password\n", name, d.Addr, d.Model)
 		case err != nil:
-			fmt.Printf("# %s (%s %s): %v\n", name, d.Addr, d.Model, err)
+			fmt.Printf("# %s (%s %s): %s\n", name, d.Addr, d.Model, onvif.Clean(feeds.Redact(err.Error())))
 		case len(ss) == 0:
 			fmt.Printf("# %s (%s): no RTSP streams listed\n", name, d.Addr)
 		default:

@@ -63,7 +63,7 @@ func TestArgsAndWants(t *testing.T) {
 	cam.Audio = true
 	r := &Recorder{Segment: 15 * time.Minute, Bitrate: "48k"}
 	a := strings.Join(r.Args(cam, "/rec/01 Front door"), " ")
-	for _, want := range []string{"-map 0:a:0 -vn", "-segment_time 900 -segment_atclocktime 1", "flush_packets=1", "/rec/01 Front door/%Y-%m-%d_%H-%M-%S.m4a"} {
+	for _, want := range []string{"-map 0:a:0 -vn", "-segment_time 900 -segment_atclocktime 1", "flush_packets=1", "/rec/01 Front door/" + namePattern() + ""} {
 		if !strings.Contains(a, want) {
 			t.Errorf("args lack %q: %s", want, a)
 		}
@@ -73,5 +73,27 @@ func TestArgsAndWants(t *testing.T) {
 	offline.Note = "could not read its size"
 	if !Wants(cam) || Wants(pic) || !Wants(offline) {
 		t.Error("Wants")
+	}
+}
+
+func TestRepeatedHourAndPruneScope(t *testing.T) {
+	// the hour clocks go back: same local time, different offsets
+	a, okA := startOf("2026-11-01_01-30-00-0400.m4a")
+	b, okB := startOf("2026-11-01_01-30-00-0500.m4a")
+	if !okA || !okB || b.Sub(a) != time.Hour {
+		t.Fatalf("offsets: %v %v %v", a, b, b.Sub(a))
+	}
+	if _, ok := startOf("2026-11-01_01-30-00.m4a"); !ok {
+		t.Error("older names without an offset must still be read")
+	}
+	dir := t.TempDir()
+	other := filepath.Join(dir, "photos", "deep")
+	os.MkdirAll(other, 0o755)
+	old := filepath.Join(other, "2020-01-01_00-00-00.m4a")
+	os.WriteFile(old, []byte("x"), 0o644)
+	r := &Recorder{Dir: dir, Keep: time.Hour, Segment: time.Minute}
+	r.Prune(time.Now())
+	if _, err := os.Stat(old); err != nil {
+		t.Error("prune touched a file outside camwall's feed folders")
 	}
 }

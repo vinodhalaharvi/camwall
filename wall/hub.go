@@ -33,7 +33,9 @@ type Hub struct {
 	status  string
 	subs    map[chan struct{}]struct{}
 	cancel  context.CancelFunc
+	done    chan struct{} // closed when the current run (and its FFmpeg) has ended
 	stopper *time.Timer
+	closed  bool
 }
 
 // Status is what the page shows on a tile.
@@ -75,11 +77,18 @@ func (h *Hub) Subscribe(ch chan struct{}) func() {
 		h.stopper.Stop()
 		h.stopper = nil
 	}
-	if h.cancel == nil {
+	if h.cancel == nil && !h.closed {
 		ctx, cancel := context.WithCancel(context.Background())
-		h.cancel = cancel
+		prev, done := h.done, make(chan struct{})
+		h.cancel, h.done = cancel, done
 		h.status = "starting"
-		go h.run(ctx)
+		go func() {
+			defer close(done)
+			if prev != nil {
+				<-prev // never two FFmpegs for one feed
+			}
+			h.run(ctx)
+		}()
 	}
 	h.mu.Unlock()
 	return func() {
@@ -99,6 +108,25 @@ func (h *Hub) Subscribe(ch chan struct{}) func() {
 	}
 }
 
+// Stop ends the feed's FFmpeg for good and waits for it to exit.
+func (h *Hub) Stop() {
+	h.mu.Lock()
+	h.closed = true
+	if h.stopper != nil {
+		h.stopper.Stop()
+		h.stopper = nil
+	}
+	if h.cancel != nil {
+		h.cancel()
+		h.cancel, h.status = nil, "idle"
+	}
+	done := h.done
+	h.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 func (h *Hub) args(f feeds.Feed) []string {
 	scale := "scale='if(gte(iw,ih),min(" + strconv.Itoa(h.MaxSide) + ",iw),-2)':'if(gte(iw,ih),-2,min(" + strconv.Itoa(h.MaxSide) + ",ih))'"
 	vf := "fps=" + strconv.Itoa(h.FPS) + "," + scale
@@ -111,6 +139,13 @@ func (h *Hub) args(f feeds.Feed) []string {
 }
 
 func (h *Hub) run(ctx context.Context) {
+	defer func() {
+		// a stopped feed shows nothing rather than an old picture as if live
+		h.mu.Lock()
+		h.frame, h.last = nil, time.Time{}
+		h.seq++
+		h.mu.Unlock()
+	}()
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
@@ -150,9 +185,10 @@ func (h *Hub) once(ctx context.Context) error {
 	f, err := h.Feed.Opened(octx, h.Tools)
 	cancel()
 	if err != nil {
-		return err
+		return &ffError{feeds.Redact(err.Error())}
 	}
-	cmd := exec.CommandContext(ctx, h.Tools.FFmpeg, h.args(f)...)
+	cmd := feeds.Child(exec.CommandContext(ctx, h.Tools.FFmpeg, h.args(f)...))
+	cmd.WaitDelay = 5 * time.Second
 	errs := &tail{}
 	cmd.Stderr = errs
 	out, err := cmd.StdoutPipe()
@@ -168,7 +204,7 @@ func (h *Hub) once(ctx context.Context) error {
 		if i := bytes.LastIndexByte(msg, '\n'); i >= 0 {
 			msg = msg[i+1:]
 		}
-		return &ffError{string(msg)}
+		return &ffError{feeds.Redact(string(msg))}
 	}
 	if waitErr != nil {
 		return waitErr
