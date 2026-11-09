@@ -45,6 +45,7 @@ func init() {
 const usage = `camwall puts every camera feed on one gap-free wall.
 
 Usage:
+  camwall demo     [flags]             try it with no cameras: pet clips as cameras
   camwall serve    [flags] SOURCE...   watch the wall in a browser
   camwall stream   [flags] SOURCE...   combine the feeds into one video with FFmpeg
   camwall plan     [flags] SOURCE...   print the wall for a screen shape
@@ -141,6 +142,8 @@ func main() {
 		return
 	case args[0] == "serve":
 		err = serve(args[1:])
+	case args[0] == "demo":
+		err = demo(args[1:])
 	case args[0] == "stream":
 		err = stream(args[1:])
 	case args[0] == "plan":

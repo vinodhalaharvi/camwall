@@ -1,3 +1,10 @@
+**0.1.3**
+
+- `camwall demo`: try camwall with no cameras. Six pet clips (3.5 MB, downloaded once) play as cameras next to a still picture; offline, FFmpeg's moving test pictures stand in.
+- Walls of many different shapes (a folder of photos) lay out in under a second instead of failing with "too many different feed sizes": close shapes are grouped, each feed still shown whole.
+- Up to 16 feeds per wall (was 25): about what a laptop decodes comfortably.
+- Webcams and screens no longer hold up the start for 20 seconds, and camwall says which feeds it is waiting for (and to allow camera or screen-recording permission).
+
 **0.1.2** comes from running every supported source through one wall (RTSP, RTMP, SRT, UDP, HLS, MJPEG over HTTP, snapshot URLs, a dozen video formats, animations, pictures and the screen):
 
 - MJPEG cameras over HTTP showed about one frame a second; they now show every frame asked for.
@@ -27,6 +34,6 @@ brew install vinodhalaharvi/tap/camwall
 - `camwall record` (or `serve -record`) keeps every feed's sound in time-stamped files, with a Recordings page to find any moment.
 - `camwall discover` finds ONVIF cameras on your network and prints their RTSP addresses; `camwall devices` lists this computer's cameras and screens.
 
-Sources: IP cameras (RTSP, RTMP, SRT, UDP, HTTP), HLS, YouTube and other web video (with yt-dlp), webcams and capture devices, video files, GIFs and pictures, up to 25 per wall.
+Sources: IP cameras (RTSP, RTMP, SRT, UDP, HTTP), HLS, YouTube and other web video (with yt-dlp), webcams and capture devices, video files, GIFs and pictures, up to 16 per wall.
 
 The binaries below are for macOS (Apple Silicon and Intel) and Linux (x86-64 and ARM64) and need FFmpeg 5 or later on your PATH. The macOS binaries are not notarised; if Gatekeeper blocks one, use Homebrew or run `xattr -d com.apple.quarantine camwall`.

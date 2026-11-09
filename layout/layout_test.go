@@ -166,7 +166,7 @@ func TestWeightMakesAFeedBigger(t *testing.T) {
 
 func TestManyCamerasAreFast(t *testing.T) {
 	var feeds []Feed
-	for range 19 {
+	for range 10 {
 		feeds = append(feeds, Feed{16.0 / 9, 1})
 	}
 	for range 4 {
@@ -181,9 +181,9 @@ func TestManyCamerasAreFast(t *testing.T) {
 	w := s.Fit(16.0 / 9)
 	checkGeometry(t, feeds, 16.0/9, w)
 	if d := time.Since(start); d > 10*time.Second && !raceOn {
-		t.Errorf("25 feeds took %v", d)
+		t.Errorf("16 feeds took %v", d)
 	}
-	t.Logf("25 feeds: %d states, %.3g shapes, smallest %.4f, fill %.3f, %v",
+	t.Logf("16 feeds: %d states, %.3g shapes, smallest %.4f, fill %.3f, %v",
 		s.Stats.States, s.Count(), w.Smallest, w.Fill, time.Since(start))
 }
 
@@ -216,7 +216,7 @@ func TestExtremeShapes(t *testing.T) {
 // keeps no search tables once solved.
 func TestTooManySizesAreEvened(t *testing.T) {
 	var feeds []Feed
-	for i := range 25 {
+	for i := range 16 {
 		w := 1.0
 		if i < 9 {
 			w = 1.5 + float64(i)*0.5 // ten different sizes
@@ -261,7 +261,7 @@ func TestFitOddScreens(t *testing.T) {
 // still lay out, quickly, with every feed shown.
 func TestManyDifferentShapes(t *testing.T) {
 	r := rand.New(rand.NewSource(7))
-	for _, n := range []int{12, 18, 25} {
+	for _, n := range []int{10, 13, 16} {
 		feeds := []Feed{{16.0 / 9, 1}, {16.0 / 9, 1}}
 		for len(feeds) < n {
 			feeds = append(feeds, Feed{Aspect: 0.5 + 1.6*r.Float64(), Weight: 1 + float64(r.Intn(3))})

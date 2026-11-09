@@ -33,6 +33,14 @@ cd camwall && make build && sudo mv camwall /usr/local/bin/
 
 Ready-made binaries for Linux and macOS are on the [releases page](https://github.com/vinodhalaharvi/camwall/releases). Check it works with `camwall version`; `camwall help` lists every command and option.
 
+## Try it with no cameras
+
+```sh
+camwall demo
+```
+
+opens the wall in your browser with six pet clips playing as if they were cameras, plus a still picture: the wall in the screenshots. The clips (3.5 MB, from Wikimedia Commons) are downloaded once into your cache folder; without a connection it shows FFmpeg's moving test pictures instead. Change the screen shape, sizes and feeds in the settings panel (`S`), tap a tile to fill the screen, and 🔊 on the puppy room to listen.
+
 ## Find your cameras
 
 Most IP cameras speak ONVIF. `camwall discover` finds them on your network and asks each one for its RTSP address:
@@ -182,10 +190,10 @@ Wall fills 95% of a 16:9 screen; the smallest feed gets 7.4% of it.
 
 The layout is a dynamic program written with [dyna](https://github.com/vinodhalaharvi/dyna), the same library behind [collage](https://github.com/vinodhalaharvi/collage). It searches every *guillotine* wall, meaning every way to split the screen in two, then each part in two, and so on.
 
-- **Feeds are grouped into kinds.** Cameras that share a shape and a weight are interchangeable, so the search tracks how many of each kind are left rather than which ones. Sixteen identical cameras give 17 subproblems instead of 65,536, which is why camwall handles 25 feeds where collage stops at 10.
+- **Feeds are grouped into kinds.** Cameras that share a shape and a weight are interchangeable, so the search tracks how many of each kind are left rather than which ones. Sixteen identical cameras give 17 subproblems instead of 65,536, which is why camwall handles 16 feeds where collage stops at 10.
 - **Nothing is cropped.** Each tile keeps its feed's exact shape, and the wall is letterboxed into the screen. The score is the on-screen area of the smallest feed per unit of weight. It's maximised with the (max, min) semiring, graded by aspect ratio, so fitting the wall to a new screen shape is a lookup rather than a new search.
 - **Big walls stay fast.** Groups of up to 6 feeds are split every possible way. Larger groups split off a block of one kind (such as a row of identical cameras) or one or two other feeds, and groups of up to 10 are also halved every way. Against a brute-force search on random mixed walls of 7 to 10 feeds, the median result was the best possible, 9 in 10 were within 5%, and the worst was 15% short of it.
-- **Many different shapes are grouped.** Every distinct shape and size is another kind, and the search grows quickly with kinds, so a folder of photos (each its own shape) would take minutes. When a search would take more than about a second, camwall treats close shapes as one (a 1.30 photo in a 1.34 tile gets a hair-thin border; nothing is cropped), and only if that is not enough evens out the sizes asked for, and says so. 25 photos of random shapes lay out in under a second.
+- **Many different shapes are grouped.** Every distinct shape and size is another kind, and the search grows quickly with kinds, so a folder of photos (each its own shape) would take minutes. When a search would take more than about a second, camwall treats close shapes as one (a 1.30 photo in a 1.34 tile gets a hair-thin border; nothing is cropped), and only if that is not enough evens out the sizes asked for, and says so. 16 photos of random shapes lay out in under a second.
 
 `camwall laws` checks that the algebra obeys the semiring laws that make this correct, and compares the dynamic program with brute force.
 
@@ -209,7 +217,7 @@ The layout is a dynamic program written with [dyna](https://github.com/vinodhala
 
 ## Limits
 
-- Up to 25 feeds per wall. For more, run a second wall.
+- Up to 16 feeds per wall (a 4×4 wall's worth). Each camera is one FFmpeg decoding video, which is about what a laptop handles well; for more, run a second wall on another port (`-addr :7789`).
 - Each feed costs one FFmpeg decode. A wall of 16 HD cameras needs a reasonably recent computer, so lower `-fps` or `-max` in the browser, or `-size` for streams, on small machines. A camera's sub-stream (often `…/102` or `subtype=1`) is lighter and plenty for a wall.
 - The browser wall plays one camera's sound at a time, and the combined stream carries one feed's sound. Recording keeps every feed's sound.
 - A capture device such as a webcam can usually be opened by only one program at a time, so it can't be in a browser wall and a combined stream at once.

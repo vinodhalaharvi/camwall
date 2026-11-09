@@ -69,7 +69,7 @@ const (
 	MaxKinds = 16 // distinct (aspect, weight) pairs
 	// MaxFeeds keeps a wall solvable in about a second; past this, each feed
 	// is too small to watch anyway, so run a second wall.
-	MaxFeeds = 25
+	MaxFeeds = 16
 )
 
 // State counts the feeds of each kind still to be placed.
