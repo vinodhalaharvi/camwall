@@ -24,7 +24,15 @@ type Tools struct {
 	FFprobe string // empty: shapes are not probed (16:9 is assumed)
 	YtDlp   string // empty: web pages cannot be opened
 	TempDir string // where converted pictures go
+	// Waiting, if set, is told after a few seconds which feeds Prepare is
+	// still waiting for.
+	Waiting func(names []string)
 }
+
+// DeviceWait is how long Prepare waits for this computer's own cameras and
+// screens to show their size; past it they are assumed 16:9 (or the screen's
+// usual shape) and the wall starts.
+var DeviceWait = 8 * time.Second
 
 // ---------- Web pages ----------
 
@@ -359,11 +367,41 @@ func lastLine(s string, fallback error) string {
 func Prepare(fs []Feed, t Tools, timeout time.Duration) error {
 	var wg sync.WaitGroup
 	errs := make([]error, len(fs))
+	var mu sync.Mutex
+	pending := map[int]string{}
+	for i := range fs {
+		pending[i] = fs[i].Name
+	}
+	all := make(chan struct{})
+	if t.Waiting != nil {
+		go func() {
+			select {
+			case <-all:
+			case <-time.After(4 * time.Second):
+				mu.Lock()
+				var names []string
+				for i := range fs {
+					if n, ok := pending[i]; ok {
+						names = append(names, n)
+					}
+				}
+				mu.Unlock()
+				if len(names) > 0 {
+					t.Waiting(names)
+				}
+			}
+		}()
+	}
 	for i := range fs {
 		wg.Add(1)
 		go func(i int, f *Feed) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer func() { mu.Lock(); delete(pending, i); mu.Unlock() }()
+			wait := timeout
+			if f.Format != "" && f.Format != "lavfi" && !f.Web && Scheme(f.Input) == "" && wait > DeviceWait {
+				wait = DeviceWait // a webcam or screen answers quickly or not at all
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), wait)
 			defer cancel()
 			if f.Format == "dshow" && f.Input == "" {
 				errs[i] = errors.New(f.Note)
@@ -395,6 +433,7 @@ func Prepare(fs []Feed, t Tools, timeout time.Duration) error {
 		}(i, &fs[i])
 	}
 	wg.Wait()
+	close(all)
 	return errors.Join(errs...)
 }
 

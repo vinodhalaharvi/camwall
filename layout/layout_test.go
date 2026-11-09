@@ -256,3 +256,33 @@ func TestFitOddScreens(t *testing.T) {
 		}
 	}
 }
+
+// Photos come in every shape. 23 different ones plus two 16:9 screens must
+// still lay out, quickly, with every feed shown.
+func TestManyDifferentShapes(t *testing.T) {
+	r := rand.New(rand.NewSource(7))
+	for _, n := range []int{12, 18, 25} {
+		feeds := []Feed{{16.0 / 9, 1}, {16.0 / 9, 1}}
+		for len(feeds) < n {
+			feeds = append(feeds, Feed{Aspect: 0.5 + 1.6*r.Float64(), Weight: 1 + float64(r.Intn(3))})
+		}
+		start := time.Now()
+		sv, err := Solve(feeds)
+		if err != nil {
+			t.Fatalf("%d feeds: %v", n, err)
+		}
+		w := sv.Fit(16.0 / 9)
+		if len(w.Tiles) != n {
+			t.Fatalf("%d feeds: %d tiles", n, len(w.Tiles))
+		}
+		if d := time.Since(start); d > 4*time.Second && !raceOn {
+			t.Errorf("%d feeds took %v", n, d)
+		}
+		for i, f := range sv.Feeds {
+			if f.Aspect != feeds[i].Aspect {
+				t.Fatalf("feed %d reports a merged shape", i)
+			}
+		}
+		t.Logf("%d feeds: %v, evened %v, smallest %.3f", n, time.Since(start).Round(time.Millisecond), sv.Evened, w.Smallest)
+	}
+}

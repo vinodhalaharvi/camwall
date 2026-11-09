@@ -327,7 +327,7 @@ func Group(feeds []Feed) (kinds []Feed, kindOf []int, err error) {
 		if k < 0 {
 			k = len(kinds)
 			if k == MaxKinds {
-				return nil, nil, fmt.Errorf("at most %d different feed shapes and weights", MaxKinds)
+				return nil, nil, ErrTooManySizes // Solve merges shapes to fit
 			}
 			kinds = append(kinds, f)
 		}
@@ -336,12 +336,12 @@ func Group(feeds []Feed) (kinds []Feed, kindOf []int, err error) {
 	return kinds, kindOf, nil
 }
 
-// MaxWork bounds a solve: the number of subproblems (one per way of
-// choosing how many feeds of each kind are left) times the number of feeds.
-// Every distinct size makes another kind, and the work grows fast with kinds:
-// 25,000 is about 1.5 s on one core; 25 feeds in 10 kinds would need
-// gigabytes. Past it, Solve evens out the sizes (see Solve).
-var MaxWork = 25000
+// MaxWork bounds a solve: the number of (sub-wall, part of it) pairs the
+// search looks at. Every distinct shape and size makes another kind, and the
+// work grows fast with kinds: 40,000 pairs is about a second on one core;
+// 25 feeds in 10 kinds would need gigabytes. Past it, Solve merges shapes
+// and evens out sizes (see Solve).
+var MaxWork = 40000
 
 // ErrTooManySizes is returned when the feeds have too many different shapes
 // and sizes to solve quickly.
@@ -353,32 +353,84 @@ func Work(kindOf []int) int {
 	for _, k := range kindOf {
 		counts[k]++
 	}
-	states := 1
+	// pairs of (sub-wall, part of it): every split the search looks at
+	pairs := 1
 	for _, c := range counts {
-		states *= c + 1
-		if states > MaxWork {
+		pairs *= (c + 1) * (c + 2) / 2
+		if pairs > MaxWork {
 			return MaxWork + 1
 		}
 	}
-	return states * len(kindOf)
+	return pairs
 }
 
-// Solve searches every gap-free guillotine wall of the feeds. When the
-// feeds have too many different sizes to search quickly, it lays them out at
-// equal size instead and sets Evened.
+// Solve searches every gap-free guillotine wall of the feeds. Feeds of many
+// different shapes and sizes make the search grow fast, so when they would
+// take too long Solve simplifies, in order, until the search is quick:
+//
+//  1. shapes within a few percent are treated as one (letterboxed slightly),
+//  2. the sizes asked for are evened out (Evened is set),
+//  3. shapes are merged ever more coarsely (up to about 40% apart).
+//
+// A feed whose tile is not quite its shape is shown whole inside it, with a
+// thin border.
 func Solve(feeds []Feed) (*Solved, error) {
 	sv, err := SolveUpTo(feeds, ExhaustiveUpTo)
 	if err != ErrTooManySizes {
+		return sv, err
+	}
+	try := func(fs []Feed, evened bool) (*Solved, error) {
+		sv, err := SolveUpTo(fs, ExhaustiveUpTo)
+		if sv != nil {
+			sv.Evened = evened
+			sv.Feeds = append([]Feed(nil), sv.Feeds...)
+			for i := range sv.Feeds { // report the real shapes, not the merged ones
+				sv.Feeds[i].Aspect = feeds[i].Aspect
+			}
+		}
 		return sv, err
 	}
 	even := make([]Feed, len(feeds))
 	for i, f := range feeds {
 		even[i] = Feed{Aspect: f.Aspect, Weight: 1}
 	}
-	if sv, err = SolveUpTo(even, ExhaustiveUpTo); sv != nil {
-		sv.Evened = true
+	for _, tol := range []float64{0.04, 0.08, 0.15} {
+		if sv, err := try(MergeShapes(feeds, tol), false); err != ErrTooManySizes {
+			return sv, err
+		}
 	}
-	return sv, err
+	for _, tol := range []float64{0, 0.04, 0.08, 0.15, 0.25, 0.4, 0.7} {
+		if sv, err := try(MergeShapes(even, tol), true); err != ErrTooManySizes {
+			return sv, err
+		}
+	}
+	return nil, ErrTooManySizes
+}
+
+// MergeShapes gives feeds whose shapes are within tol of each other (as a
+// log ratio: 0.1 is about 10%) one shared shape, the middle of their group.
+func MergeShapes(feeds []Feed, tol float64) []Feed {
+	out := append([]Feed(nil), feeds...)
+	if tol <= 0 {
+		return out
+	}
+	idx := make([]int, len(out))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(a, b int) bool { return out[idx[a]].Aspect < out[idx[b]].Aspect })
+	for start := 0; start < len(idx); {
+		end := start + 1
+		for end < len(idx) && math.Log(feeds[idx[end]].Aspect/feeds[idx[start]].Aspect) <= tol {
+			end++
+		}
+		mid := math.Sqrt(feeds[idx[start]].Aspect * feeds[idx[end-1]].Aspect)
+		for _, i := range idx[start:end] {
+			out[i].Aspect = mid
+		}
+		start = end
+	}
+	return out
 }
 
 // SolveUpTo is Solve with a different exhaustive limit (for tests).

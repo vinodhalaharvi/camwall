@@ -264,6 +264,16 @@ func (c *common) load(srcs []string, needFFmpeg bool) ([]feeds.Feed, feeds.Tools
 	t.TempDir = tmpDir
 	fmt.Fprintf(os.Stderr, "Getting %d feed%s ready…\n", len(fs), plural(len(fs)))
 	feeds.UniqueNames(fs)
+	t.Waiting = func(names []string) {
+		msg := "  still waiting for " + strings.Join(names, ", ")
+		for _, n := range names {
+			if strings.HasPrefix(strings.ToLower(n), "screen") || strings.HasPrefix(strings.ToLower(n), "webcam") || strings.HasPrefix(strings.ToLower(n), "camera") {
+				msg += " (if your computer asked whether camwall's terminal may record the screen or use the camera, allow it)"
+				break
+			}
+		}
+		fmt.Fprintln(os.Stderr, msg+"…")
+	}
 	if err := feeds.Prepare(fs, t, 20*time.Second); err != nil {
 		return nil, t, err
 	}
