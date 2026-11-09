@@ -362,7 +362,7 @@ func serve(args []string) error {
 	for i, f := range feedsList {
 		base[i], all[i] = f.Weight, i
 	}
-	if _, err := srv.Solve(all, base); err != nil {
+	if _, err := srv.Solve(context.Background(), all, base); err != nil {
 		return err
 	}
 	h := srv.Handler()

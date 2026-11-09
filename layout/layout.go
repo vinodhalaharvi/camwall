@@ -338,10 +338,12 @@ func Group(feeds []Feed) (kinds []Feed, kindOf []int, err error) {
 
 // MaxWork bounds a solve: the number of (sub-wall, part of it) pairs the
 // search looks at. Every distinct shape and size makes another kind, and the
-// work grows fast with kinds: 40,000 pairs is about a second on one core;
-// 25 feeds in 10 kinds would need gigabytes. Past it, Solve merges shapes
-// and evens out sizes (see Solve).
-var MaxWork = 40000
+// work grows fast with kinds: 15,000 pairs is about a quarter of a second
+// on one core, quick enough to re-solve as someone hides feeds or drags a
+// size; 16 feeds in 10 kinds would need gigabytes. Past it, Solve merges
+// shapes and evens out sizes (see Solve), which on random photo walls
+// costs well under 1% of the smallest feed's size.
+var MaxWork = 15000
 
 // ErrTooManySizes is returned when the feeds have too many different shapes
 // and sizes to solve quickly.

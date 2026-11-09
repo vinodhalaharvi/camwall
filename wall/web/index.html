@@ -304,6 +304,7 @@ function changed(feedsChanged) {
 function stageAspect() { return wall.clientWidth / Math.max(1, wall.clientHeight); }
 
 let seq = 0;
+let pendingLayout = null;
 async function relayout() {
   const my = ++seq;
   const W = wall.clientWidth, H = wall.clientHeight;
@@ -316,16 +317,22 @@ async function relayout() {
   if (!on.length) { $('summary').textContent = '0 feeds shown'; return; }
   const q = `aspect=${(sw / sh).toFixed(4)}&show=${on.map(f => f.id).join(',')}&weights=${feeds.map(sizeOf).join(',')}`;
   let L;
+  // only the newest layout matters: cancel the one before, so the server
+  // never works through a queue of layouts nobody will see
+  if (pendingLayout) pendingLayout.abort();
+  const ctl = pendingLayout = new AbortController();
+  const slow = setTimeout(() => { if (my === seq) $('summary').textContent = 'Arranging…'; }, 400);
   try {
-    const r = await fetch('api/layout?' + q);
+    const r = await fetch('api/layout?' + q, { signal: ctl.signal });
     if (!r.ok) throw new Error(await r.text());
     L = await r.json();
   } catch (e) {
-    if (my !== seq) return;
+    if (my !== seq || e.name === 'AbortError') return;
     toast('Could not lay out the wall: ' + e.message + ' Trying again…');
     clearTimeout(rt); rt = setTimeout(relayout, 3000);
     return;
   }
+  finally { clearTimeout(slow); }
   if (my !== seq) return;           // a newer request is on its way
   toast('');
   for (const tl of L.tiles) {

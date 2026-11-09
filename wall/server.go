@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -75,43 +76,69 @@ func New(title string, t feeds.Tools, fs []feeds.Feed, fps, maxSide, quality int
 // Solves run one at a time and outside the lock, so a slow one never holds
 // up requests for walls already solved; concurrent requests for the same
 // wall share one solve. Tiles of the result refer to positions in ids.
-func (s *Server) Solve(ids []int, weights []float64) (*layout.Solved, error) {
-	key := fmt.Sprint(ids, weights)
-	s.mu.Lock()
-	if sv, ok := s.cache[key]; ok {
-		s.mu.Unlock()
-		return sv, nil
+// errGaveUp: the request that started a solve went away before it ran.
+var errGaveUp = errors.New("gave up")
+
+func (s *Server) Solve(ctx context.Context, ids []int, weights []float64) (*layout.Solved, error) {
+	// hidden feeds' sizes don't change the wall: leave them out of the key
+	shownW := make([]float64, len(ids))
+	for i, id := range ids {
+		shownW[i] = weights[id]
 	}
-	if c, ok := s.inflight[key]; ok {
+	key := fmt.Sprint(ids, shownW)
+	for {
+		s.mu.Lock()
+		if sv, ok := s.cache[key]; ok {
+			s.mu.Unlock()
+			return sv, nil
+		}
+		if c, ok := s.inflight[key]; ok {
+			s.mu.Unlock()
+			select {
+			case <-c.done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			if c.err == errGaveUp {
+				continue // its first asker left; solve it for this one
+			}
+			return c.sv, c.err
+		}
+		c := &solveCall{done: make(chan struct{})}
+		s.inflight[key] = c
 		s.mu.Unlock()
-		<-c.done
+
+		lf := make([]layout.Feed, len(ids))
+		for i, id := range ids {
+			lf[i] = layout.Feed{Aspect: s.Feeds[id].Aspect, Weight: weights[id]}
+		}
+		// one solve at a time; a request nobody waits for any more (the
+		// page asked for a newer layout) never starts solving
+		select {
+		case s.solving <- struct{}{}:
+			c.sv, c.err = layout.Solve(lf)
+			<-s.solving
+		case <-ctx.Done():
+			c.err = errGaveUp
+		}
+
+		s.mu.Lock()
+		delete(s.inflight, key)
+		if c.err == nil {
+			s.cache[key] = c.sv
+			s.order = append(s.order, key)
+			if len(s.order) > 32 {
+				delete(s.cache, s.order[0])
+				s.order = s.order[1:]
+			}
+		}
+		s.mu.Unlock()
+		close(c.done)
+		if c.err == errGaveUp {
+			return nil, ctx.Err()
+		}
 		return c.sv, c.err
 	}
-	c := &solveCall{done: make(chan struct{})}
-	s.inflight[key] = c
-	s.mu.Unlock()
-
-	lf := make([]layout.Feed, len(ids))
-	for i, id := range ids {
-		lf[i] = layout.Feed{Aspect: s.Feeds[id].Aspect, Weight: weights[id]}
-	}
-	s.solving <- struct{}{}
-	c.sv, c.err = layout.Solve(lf)
-	<-s.solving
-
-	s.mu.Lock()
-	delete(s.inflight, key)
-	if c.err == nil {
-		s.cache[key] = c.sv
-		s.order = append(s.order, key)
-		if len(s.order) > 32 {
-			delete(s.cache, s.order[0])
-			s.order = s.order[1:]
-		}
-	}
-	s.mu.Unlock()
-	close(c.done)
-	return c.sv, c.err
 }
 
 // Close stops every feed's FFmpeg and waits for them (and any live-sound
@@ -227,7 +254,7 @@ func (s *Server) apiLayout(w http.ResponseWriter, r *http.Request) {
 			weights[i] = math.Min(10, math.Max(0.5, math.Round(x*2)/2))
 		}
 	}
-	sv, err := s.Solve(ids, weights)
+	sv, err := s.Solve(r.Context(), ids, weights)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
